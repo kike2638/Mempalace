@@ -1,11 +1,15 @@
 """Tests for mempalace.entity_detector."""
 
 import os
+import shutil
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from mempalace.entity_detector import (
     PROSE_EXTENSIONS,
     STOPWORDS,
+    _build_patterns,
     _print_entity_list,
     classify_entity,
     confirm_entities,
@@ -378,3 +382,125 @@ def test_scan_for_detection_max_files(tmp_path):
         (tmp_path / f"note{i}.md").write_text(f"content {i}")
     files = scan_for_detection(str(tmp_path), max_files=5)
     assert len(files) <= 5
+
+
+# ── Brazilian Portuguese (pt-br) tests — PR #156 ─────────────────────────────
+
+
+def test_scores_english_person_verbs():
+    text = (
+        "Maria said hello to the team.\n"
+        "Maria asked about the release.\n"
+        "Maria decided to approve it.\n"
+        "Maria wrote the spec. Maria wrote the email.\n"
+    )
+    scores = score_entity("Maria", text, text.splitlines())
+    assert scores["person_score"] > 0
+    assert any("action" in s for s in scores["person_signals"])
+
+
+def test_scores_portuguese_person_verbs():
+    text = (
+        "Maria disse oi para o time.\n"
+        "Maria perguntou sobre o lançamento.\n"
+        "Maria decidiu aprovar.\n"
+        "Depois Maria escreveu a spec. Maria escreveu o email.\n"
+    )
+    scores = score_entity("Maria", text, text.splitlines())
+    assert scores["person_score"] > 0
+    assert any("action" in s for s in scores["person_signals"])
+
+    patterns = _build_patterns("Maria")
+    assert any(rx.search("Maria disse oi") for rx in patterns["person_verbs"])
+    assert any(rx.search("Maria perguntou algo") for rx in patterns["person_verbs"])
+    assert any(rx.search("Maria decidiu aprovar") for rx in patterns["person_verbs"])
+
+
+def test_portuguese_pronoun_proximity():
+    text = (
+        "Maria estava no escritório hoje.\n"
+        "Ela pediu café e começou a revisar o código.\n"
+        "Dela veio a sugestão de migrar para Postgres.\n"
+        "Maria estava no escritório hoje.\n"
+        "Ela pediu café e começou a revisar o código.\n"
+        "Dela veio a sugestão de migrar para Postgres.\n"
+    )
+    scores = score_entity("Maria", text, text.splitlines())
+    assert any("pronoun" in s for s in scores["person_signals"])
+
+
+def test_portuguese_direct_address():
+    text = "oi Maria, tudo bem? obrigado Maria. olá Maria, chegou o relatório."
+    patterns = _build_patterns("Maria")
+    assert len(patterns["direct"].findall(text)) == 3
+
+    scores = score_entity("Maria", text, text.splitlines())
+    assert scores["person_score"] >= 12
+
+
+def test_mixed_english_portuguese_corpus():
+    english_only = (
+        "Maria said hello.\n"
+        "Maria asked about the release.\n"
+        "Maria decided to ship.\n"
+        "Maria wrote the note.\n"
+        "Maria wrote the note.\n"
+    )
+    mixed = (
+        "Maria said hello. Maria disse oi.\n"
+        "Maria asked about the release. Maria perguntou sobre o lançamento.\n"
+        "Maria decided to ship. Maria decidiu entregar.\n"
+        "Maria wrote the note. Maria escreveu a nota.\n"
+        "Maria wrote the note. Maria escreveu a nota.\n"
+    )
+    english_scores = score_entity("Maria", english_only, english_only.splitlines())
+    mixed_scores = score_entity("Maria", mixed, mixed.splitlines())
+    assert mixed_scores["person_score"] > english_scores["person_score"]
+
+
+def test_portuguese_dialogue_marker_in_quoted_text():
+    text = '"Maria disse que o deploy rodou bem."\n"Maria disse que está tudo OK."\n'
+    scores = score_entity("Maria", text, text.splitlines())
+    assert any("dialogue" in s for s in scores["person_signals"])
+
+
+def test_detect_entities_finds_portuguese_person():
+    text = (
+        "Maria disse que o deploy foi bem.\n"
+        "Depois Maria perguntou sobre o backend.\n"
+        "Maria decidiu aprovar a migração.\n"
+        "Maria escreveu a documentação final.\n"
+        "Ela é a nova líder do time.\n"
+    )
+    tmpdir = tempfile.mkdtemp()
+    try:
+        file_path = Path(tmpdir) / "reuniao.md"
+        file_path.write_text(text, encoding="utf-8")
+        detected = detect_entities([file_path])
+        all_names = [e["name"] for e in detected["people"] + detected["uncertain"]]
+        assert "Maria" in all_names
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_detect_entities_picks_up_accented_names():
+    text = (
+        "João é o líder do time.\n"
+        "João disse que o lançamento foi bem.\n"
+        "João perguntou sobre o backend novo.\n"
+        "Depois João escreveu o relatório.\n"
+        "Inês entrou no projeto semana passada.\n"
+        "Inês disse que prefere Postgres.\n"
+        "Inês escreveu a documentação da API.\n"
+        "Inês decidiu aprovar a migração.\n"
+    )
+    tmpdir = tempfile.mkdtemp()
+    try:
+        file_path = Path(tmpdir) / "reuniao.md"
+        file_path.write_text(text, encoding="utf-8")
+        detected = detect_entities([file_path])
+        all_names = [e["name"] for e in detected["people"] + detected["uncertain"]]
+        assert "João" in all_names
+        assert "Inês" in all_names
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)

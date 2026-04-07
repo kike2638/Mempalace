@@ -68,6 +68,47 @@ DIALOGUE_PATTERNS = [
     r'"{name}\s+said',
 ]
 
+# Brazilian Portuguese (pt-br) localisations — issue #117.
+# Additive on top of the English patterns so detection still works on mixed
+# English / Portuguese corpora without having to classify files by language.
+PERSON_VERB_PATTERNS_PTBR = [
+    r"\b{name}\s+disse\b",  # said
+    r"\b{name}\s+perguntou\b",  # asked
+    r"\b{name}\s+respondeu\b",  # replied
+    r"\b{name}\s+contou\b",  # told
+    r"\b{name}\s+riu\b",  # laughed
+    r"\b{name}\s+sorriu\b",  # smiled
+    r"\b{name}\s+chorou\b",  # cried
+    r"\b{name}\s+sentiu\b",  # felt
+    r"\b{name}\s+pensa\b",  # thinks
+    r"\b{name}\s+quer\b",  # wants
+    r"\b{name}\s+ama\b",  # loves
+    r"\b{name}\s+odeia\b",  # hates
+    r"\b{name}\s+sabe\b",  # knows
+    r"\b{name}\s+decidiu\b",  # decided
+    r"\b{name}\s+escreveu\b",  # wrote
+    r"\boi\s+{name}\b",  # hi
+    r"\bol[áa]\s+{name}\b",  # hello
+    r"\bobrigad[oa]\s+{name}\b",  # thanks
+    r"\bcaro\s+{name}\b",  # dear
+    r"\bcara\s+{name}\b",  # dear (feminine)
+]
+
+PRONOUN_PATTERNS_PTBR = [
+    r"\bela\b",
+    r"\bdela\b",
+    r"\bele\b",
+    r"\bdele\b",
+    r"\beles\b",
+    r"\belas\b",
+    r"\bdeles\b",
+    r"\bdelas\b",
+]
+
+DIALOGUE_PATTERNS_PTBR = [
+    r'"{name}\s+disse',
+]
+
 # Project signals — things projects have/do
 PROJECT_VERB_PATTERNS = [
     r"\bbuilding\s+{name}\b",
@@ -319,6 +360,14 @@ STOPWORDS = {
     "right",
     "let",
     "ok",
+    # Brazilian Portuguese greetings and filler words
+    "oi",
+    "ola",
+    "olá",
+    "obrigado",
+    "obrigada",
+    "caro",
+    "cara",
     # UI/action words that appear in how-to content
     "click",
     "hit",
@@ -445,8 +494,10 @@ def extract_candidates(text: str) -> dict:
     Extract all capitalized proper noun candidates from text.
     Returns {name: frequency} for names appearing 3+ times.
     """
-    # Find all capitalized words (not at sentence start — harder, so we use frequency as filter)
-    raw = re.findall(r"\b([A-Z][a-z]{1,19})\b", text)
+    # Find all capitalized words (not at sentence start — harder, so we use frequency as filter).
+    # The character classes include Latin-1 supplement so accented names like
+    # João, Inês, Ângela, and André are picked up alongside ASCII names.
+    raw = re.findall(r"\b([A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]{1,19})\b", text)
 
     counts = defaultdict(int)
     for word in raw:
@@ -454,7 +505,7 @@ def extract_candidates(text: str) -> dict:
             counts[word] += 1
 
     # Also find multi-word proper nouns (e.g. "Memory Palace", "Claude Code")
-    multi = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", text)
+    multi = re.findall(r"\b([A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]+(?:\s+[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]+)+)\b", text)
     for phrase in multi:
         if not any(w.lower() in STOPWORDS for w in phrase.split()):
             counts[phrase] += 1
@@ -469,15 +520,19 @@ def extract_candidates(text: str) -> dict:
 def _build_patterns(name: str) -> dict:
     """Pre-compile all regex patterns for a single entity name."""
     n = re.escape(name)
+    dialogue = DIALOGUE_PATTERNS + DIALOGUE_PATTERNS_PTBR
+    person_verbs = PERSON_VERB_PATTERNS + PERSON_VERB_PATTERNS_PTBR
     return {
-        "dialogue": [
-            re.compile(p.format(name=n), re.MULTILINE | re.IGNORECASE) for p in DIALOGUE_PATTERNS
-        ],
-        "person_verbs": [re.compile(p.format(name=n), re.IGNORECASE) for p in PERSON_VERB_PATTERNS],
+        "dialogue": [re.compile(p.format(name=n), re.MULTILINE | re.IGNORECASE) for p in dialogue],
+        "person_verbs": [re.compile(p.format(name=n), re.IGNORECASE) for p in person_verbs],
         "project_verbs": [
             re.compile(p.format(name=n), re.IGNORECASE) for p in PROJECT_VERB_PATTERNS
         ],
-        "direct": re.compile(rf"\bhey\s+{n}\b|\bthanks?\s+{n}\b|\bhi\s+{n}\b", re.IGNORECASE),
+        "direct": re.compile(
+            rf"\bhey\s+{n}\b|\bthanks?\s+{n}\b|\bhi\s+{n}\b"
+            rf"|\boi\s+{n}\b|\bol[áa]\s+{n}\b|\bobrigad[oa]\s+{n}\b",
+            re.IGNORECASE,
+        ),
         "versioned": re.compile(rf"\b{n}[-v]\w+", re.IGNORECASE),
         "code_ref": re.compile(rf"\b{n}\.(py|js|ts|yaml|yml|json|sh)\b", re.IGNORECASE),
     }
@@ -514,9 +569,10 @@ def score_entity(name: str, text: str, lines: list) -> dict:
     name_lower = name.lower()
     name_line_indices = [i for i, line in enumerate(lines) if name_lower in line.lower()]
     pronoun_hits = 0
+    all_pronoun_patterns = PRONOUN_PATTERNS + PRONOUN_PATTERNS_PTBR
     for idx in name_line_indices:
         window_text = " ".join(lines[max(0, idx - 2) : idx + 3]).lower()
-        for pronoun_pattern in PRONOUN_PATTERNS:
+        for pronoun_pattern in all_pronoun_patterns:
             if re.search(pronoun_pattern, window_text):
                 pronoun_hits += 1
                 break
