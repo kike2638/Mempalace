@@ -98,6 +98,15 @@ class MempalaceConfig:
         return self._file_config.get("palace_path", DEFAULT_PALACE_PATH)
 
     @property
+    def root_dir(self):
+        """Root directory specified during init.
+        Subdirectories become wings automatically."""
+        env_val = os.environ.get("MEMPALACE_ROOT_DIR")
+        if env_val:
+            return env_val
+        return self._file_config.get("root_dir", None)
+
+    @property
     def collection_name(self):
         """ChromaDB collection name."""
         return self._file_config.get("collection_name", DEFAULT_COLLECTION_NAME)
@@ -123,7 +132,13 @@ class MempalaceConfig:
         """Mapping of hall names to keyword lists."""
         return self._file_config.get("hall_keywords", DEFAULT_HALL_KEYWORDS)
 
-    def init(self):
+    def _save(self):
+        """Persist current config to disk."""
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        with open(self._config_file, "w") as f:
+            json.dump(self._file_config, f, indent=2)
+
+    def init(self, root_dir=None):
         """Create config directory and write default config.json if it doesn't exist."""
         self._config_dir.mkdir(parents=True, exist_ok=True)
         if not self._config_file.exists():
@@ -133,8 +148,13 @@ class MempalaceConfig:
                 "topic_wings": DEFAULT_TOPIC_WINGS,
                 "hall_keywords": DEFAULT_HALL_KEYWORDS,
             }
+            if root_dir:
+                default_config["root_dir"] = str(root_dir)
             with open(self._config_file, "w") as f:
                 json.dump(default_config, f, indent=2)
+        elif root_dir:
+            self._file_config["root_dir"] = str(root_dir)
+            self._save()
         return self._config_file
 
     def save_people_map(self, people_map):
