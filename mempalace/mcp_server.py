@@ -23,7 +23,9 @@ import sys
 import json
 import logging
 import hashlib
+import re
 from datetime import datetime
+from pathlib import Path
 
 from .config import MempalaceConfig
 from .version import __version__
@@ -86,12 +88,123 @@ def _no_palace():
     }
 
 
-# ==================== READ TOOLS ====================
+IGNORE_DIRS = {
+    "node_modules", ".git", ".cursor", "__pycache__",
+    ".venv", "venv", ".env", "dist", "build",
+    "target", ".next", ".nuxt", ".mempalace",
+    ".idea", ".vs", ".vscode",
+}
 
+# Cache for discovered wings — avoids repeated filesystem + DB scans
+_discovered_wings_cache = None
+
+
+def _folder_to_wing(folder_name: str) -> str:
+    """Normalize a folder name into a valid wing name.
+
+    Handles collisions by preserving hyphens vs underscores:
+    'My-Project' -> 'wing_my-project'
+    'my_project' -> 'wing_my_project'
+    """
+    slug = folder_name.lower()
+    slug = re.sub(r'[^a-z0-9_\-]+', '_', slug)
+    slug = slug.strip('_')
+    return f"wing_{slug}"
+
+
+def _sync_wings_from_root(force=False):
+    """
+    Scan subdirectories under root_dir and register any new ones as wings.
+
+    Called once on server startup. Results are cached so that subsequent
+    calls (e.g. from tool_status) are free unless force=True.
+
+    New folders become wings automatically. Deleted folders are left alone
+    (memories are preserved).
+    """
+    global _discovered_wings_cache
+
+    if _discovered_wings_cache is not None and not force:
+        return _discovered_wings_cache
+
+    root_dir = _config.root_dir
+    if not root_dir:
+        _discovered_wings_cache = []
+        return []
+
+    root_path = Path(root_dir).expanduser().resolve()
+    if not root_path.is_dir():
+        logger.warning(f"root_dir not found: {root_dir}")
+        _discovered_wings_cache = []
+        return []
+
+    col = _get_collection(create=True)
+    if not col:
+        _discovered_wings_cache = []
+        return []
+
+    # Gather existing wings from ChromaDB
+    existing_wings = set()
+    try:
+        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
+        for m in all_meta:
+            existing_wings.add(m.get("wing", ""))
+    except Exception:
+        pass
+
+    # Gather registered wings from wing_config.json
+    wing_config = _config.load_wing_config()
+    registered_wings = set(wing_config.get("wings", {}).keys())
+    known_wings = existing_wings | registered_wings
+
+    # Scan subdirectories
+    new_wings = []
+    for child in sorted(root_path.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith("."):
+            continue
+        if child.name.lower() in IGNORE_DIRS:
+            continue
+
+        wing_name = _folder_to_wing(child.name)
+        if wing_name not in known_wings:
+            new_wings.append({
+                "name": wing_name,
+                "path": str(child),
+                "folder": child.name,
+            })
+
+    # Register new wings in wing_config.json
+    if new_wings:
+        wings = wing_config.get("wings", {})
+        for w in new_wings:
+            wings[w["name"]] = {
+                "type": "project",
+                "path": w["path"],
+                "keywords": [w["folder"].lower()],
+                "auto_discovered": True,
+            }
+        wing_config["wings"] = wings
+        if "default_wing" not in wing_config:
+            wing_config["default_wing"] = "wing_general"
+
+        _config.save_wing_config(wing_config)
+
+        names = ", ".join(w["folder"] for w in new_wings)
+        logger.info(f"Auto-discovered {len(new_wings)} new wing(s): {names}")
+
+    _discovered_wings_cache = new_wings
+    return new_wings
+
+
+# ==================== READ TOOLS ====================
 
 def tool_status():
     col = _get_collection()
     if not col:
+
+
         return _no_palace()
     count = col.count()
     wings = {}
@@ -789,7 +902,9 @@ def handle_request(request):
 
 def main():
     logger.info("MemPalace MCP Server starting...")
+    _sync_wings_from_root()
     while True:
+
         try:
             line = sys.stdin.readline()
             if not line:
