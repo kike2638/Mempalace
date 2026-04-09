@@ -66,33 +66,52 @@ IGNORE_DIRS = {
     ".idea", ".vs", ".vscode",
 }
 
+# Cache for discovered wings — avoids repeated filesystem + DB scans
+_discovered_wings_cache = None
+
 
 def _folder_to_wing(folder_name: str) -> str:
-    """Normalize a folder name into a valid wing name."""
+    """Normalize a folder name into a valid wing name.
+
+    Handles collisions by preserving hyphens vs underscores:
+    'My-Project' -> 'wing_my-project'
+    'my_project' -> 'wing_my_project'
+    """
     slug = folder_name.lower()
-    slug = re.sub(r'[^a-z0-9]+', '_', slug)
+    slug = re.sub(r'[^a-z0-9_\-]+', '_', slug)
     slug = slug.strip('_')
     return f"wing_{slug}"
 
 
-def _sync_wings_from_root():
+def _sync_wings_from_root(force=False):
     """
     Scan subdirectories under root_dir and register any new ones as wings.
 
-    Called on server startup and on each status call. New folders become
-    wings automatically. Deleted folders are left alone (memories are preserved).
+    Called once on server startup. Results are cached so that subsequent
+    calls (e.g. from tool_status) are free unless force=True.
+
+    New folders become wings automatically. Deleted folders are left alone
+    (memories are preserved).
     """
+    global _discovered_wings_cache
+
+    if _discovered_wings_cache is not None and not force:
+        return _discovered_wings_cache
+
     root_dir = _config.root_dir
     if not root_dir:
+        _discovered_wings_cache = []
         return []
 
     root_path = Path(root_dir).expanduser().resolve()
     if not root_path.is_dir():
         logger.warning(f"root_dir not found: {root_dir}")
+        _discovered_wings_cache = []
         return []
 
     col = _get_collection(create=True)
     if not col:
+        _discovered_wings_cache = []
         return []
 
     # Gather existing wings from ChromaDB
@@ -105,15 +124,7 @@ def _sync_wings_from_root():
         pass
 
     # Gather registered wings from wing_config.json
-    wing_config_path = _config._config_dir / "wing_config.json"
-    wing_config = {}
-    if wing_config_path.exists():
-        try:
-            with open(wing_config_path) as f:
-                wing_config = json.load(f)
-        except Exception:
-            wing_config = {}
-
+    wing_config = _config.load_wing_config()
     registered_wings = set(wing_config.get("wings", {}).keys())
     known_wings = existing_wings | registered_wings
 
@@ -149,24 +160,21 @@ def _sync_wings_from_root():
         if "default_wing" not in wing_config:
             wing_config["default_wing"] = "wing_general"
 
-        _config._config_dir.mkdir(parents=True, exist_ok=True)
-        with open(wing_config_path, "w") as f:
-            json.dump(wing_config, f, indent=2)
+        _config.save_wing_config(wing_config)
 
         names = ", ".join(w["folder"] for w in new_wings)
         logger.info(f"Auto-discovered {len(new_wings)} new wing(s): {names}")
 
+    _discovered_wings_cache = new_wings
     return new_wings
 
 
 # ==================== READ TOOLS ====================
 
-
-
 def tool_status():
-    _sync_wings_from_root()
     col = _get_collection()
     if not col:
+
 
         return _no_palace()
     count = col.count()
