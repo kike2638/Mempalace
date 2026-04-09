@@ -625,7 +625,9 @@ TOOLS = {
                 "room": {"type": "string", "description": "Filter by room (optional)"},
                 "min_similarity": {
                     "type": "number",
-                    "description": "Minimum similarity threshold 0-1 (default 0.0, discarding negative scores). Results below this are omitted.",
+                    "description": "Minimum similarity threshold -1.0 to 1.0 (default 0.0, discarding negative scores). Results below this are omitted.",
+                    "minimum": -1.0,
+                    "maximum": 1.0,
                 },
             },
             "required": ["query"],

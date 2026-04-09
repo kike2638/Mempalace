@@ -60,3 +60,19 @@ class TestSearchMemories:
     def test_min_similarity_default_filters_negatives(self, palace_path, seeded_collection):
         result = search_memories("code", palace_path)
         assert all(r["similarity"] >= 0.0 for r in result["results"])
+
+    def test_min_similarity_negative_threshold(self, palace_path, seeded_collection):
+        result = search_memories("authentication", palace_path, min_similarity=-0.5)
+        assert "results" in result
+        assert all(r["similarity"] >= -0.5 for r in result["results"])
+
+    def test_min_similarity_out_of_range_returns_error(self, palace_path, seeded_collection):
+        result = search_memories("anything", palace_path, min_similarity=2.0)
+        assert "error" in result
+        result = search_memories("anything", palace_path, min_similarity=-1.5)
+        assert "error" in result
+
+    def test_total_before_filter(self, palace_path, seeded_collection):
+        result = search_memories("authentication", palace_path, min_similarity=0.99)
+        assert result["total_before_filter"] > 0
+        assert len(result["results"]) == 0

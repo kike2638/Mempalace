@@ -23,6 +23,8 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     Search the palace. Returns verbatim drawer content.
     Optionally filter by wing (project) or room (aspect).
     """
+    if not (-1.0 <= min_similarity <= 1.0):
+        raise ValueError(f"min_similarity must be between -1.0 and 1.0, got {min_similarity}")
     try:
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_collection("mempalace_drawers")
@@ -105,6 +107,8 @@ def search_memories(
     Programmatic search — returns a dict instead of printing.
     Used by the MCP server and other callers that need data.
     """
+    if not (-1.0 <= min_similarity <= 1.0):
+        return {"error": f"min_similarity must be between -1.0 and 1.0, got {min_similarity}"}
     try:
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_collection("mempalace_drawers")
@@ -159,5 +163,6 @@ def search_memories(
     return {
         "query": query,
         "filters": {"wing": wing, "room": room},
+        "total_before_filter": len(docs),
         "results": hits,
     }
