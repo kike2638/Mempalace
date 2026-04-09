@@ -35,7 +35,8 @@ class TestSearchMemories:
         assert "error" in result
 
     def test_result_fields(self, palace_path, seeded_collection):
-        result = search_memories("authentication", palace_path)
+        result = search_memories("JWT authentication tokens session management", palace_path)
+        assert len(result["results"]) > 0, "No results with positive similarity"
         hit = result["results"][0]
         assert "text" in hit
         assert "wing" in hit
@@ -43,3 +44,19 @@ class TestSearchMemories:
         assert "source_file" in hit
         assert "similarity" in hit
         assert isinstance(hit["similarity"], float)
+
+    def test_min_similarity_filters_low_scores(self, palace_path, seeded_collection):
+        result = search_memories("authentication", palace_path, min_similarity=0.99)
+        assert len(result["results"]) == 0
+
+    def test_min_similarity_keeps_high_scores(self, palace_path, seeded_collection):
+        result_all = search_memories("JWT authentication", palace_path)
+        assert len(result_all["results"]) > 0
+        top_score = result_all["results"][0]["similarity"]
+        result_filtered = search_memories("JWT authentication", palace_path, min_similarity=top_score - 0.01)
+        assert len(result_filtered["results"]) >= 1
+        assert all(r["similarity"] >= top_score - 0.01 for r in result_filtered["results"])
+
+    def test_min_similarity_default_filters_negatives(self, palace_path, seeded_collection):
+        result = search_memories("code", palace_path)
+        assert all(r["similarity"] >= 0.0 for r in result["results"])
