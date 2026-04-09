@@ -15,7 +15,7 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-from .normalize import normalize
+from .normalize import ChatGPTNormalizeError, normalize
 from .palace import SKIP_DIRS, get_collection, file_already_mined
 
 
@@ -268,6 +268,8 @@ def mine_convos(
 
     total_drawers = 0
     files_skipped = 0
+    normalize_failed_files = 0
+    files_processed = 0
     room_counts = defaultdict(int)
 
     for i, filepath in enumerate(files, 1):
@@ -281,8 +283,14 @@ def mine_convos(
         # Normalize format
         try:
             content = normalize(str(filepath))
+        except ChatGPTNormalizeError as e:
+            normalize_failed_files += 1
+            print(f"  ! [{i:4}/{len(files)}] {filepath.name[:50]:50} skipped: {e}")
+            continue
         except (OSError, ValueError):
             continue
+
+        files_processed += 1
 
         if not content or len(content.strip()) < MIN_CHUNK_SIZE:
             continue
@@ -360,8 +368,10 @@ def mine_convos(
 
     print(f"\n{'=' * 55}")
     print("  Done.")
-    print(f"  Files processed: {len(files) - files_skipped}")
+    print(f"  Files processed: {files_processed}")
     print(f"  Files skipped (already filed): {files_skipped}")
+    if normalize_failed_files:
+        print(f"  Files skipped (invalid ChatGPT exports): {normalize_failed_files}")
     print(f"  Drawers filed: {total_drawers}")
     if room_counts:
         print("\n  By room:")
