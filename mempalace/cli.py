@@ -166,15 +166,13 @@ def cmd_status(args):
 
 
 def cmd_repair(args):
-    """Rebuild palace vector index from SQLite metadata."""
-    import chromadb
+    """Rebuild palace vector index from stored metadata."""
     import shutil
 
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    from .vector_store import get_collection, reset_collection
 
-    if not os.path.isdir(palace_path):
-        print(f"\n  No palace found at {palace_path}")
-        return
+    cfg = MempalaceConfig()
+    palace_path = os.path.expanduser(args.palace) if args.palace else cfg.palace_path
 
     print(f"\n{'=' * 55}")
     print("  MemPalace Repair")
@@ -183,8 +181,7 @@ def cmd_repair(args):
 
     # Try to read existing drawers
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = get_collection(palace_path, config=cfg)
         total = col.count()
         print(f"  Drawers found: {total}")
     except Exception as e:
@@ -211,17 +208,17 @@ def cmd_repair(args):
         offset += batch_size
     print(f"  Extracted {len(all_ids)} drawers")
 
-    # Backup and rebuild
-    palace_path = palace_path.rstrip(os.sep)
-    backup_path = palace_path + ".backup"
-    if os.path.exists(backup_path):
-        shutil.rmtree(backup_path)
-    print(f"  Backing up to {backup_path}...")
-    shutil.copytree(palace_path, backup_path)
+    if os.path.isdir(palace_path):
+        backup_path = palace_path + ".backup"
+        if os.path.exists(backup_path):
+            shutil.rmtree(backup_path)
+        print(f"  Backing up to {backup_path}...")
+        shutil.copytree(palace_path, backup_path)
+    else:
+        backup_path = None
 
     print("  Rebuilding collection...")
-    client.delete_collection("mempalace_drawers")
-    new_col = client.create_collection("mempalace_drawers")
+    new_col = reset_collection(palace_path, config=cfg)
 
     filed = 0
     for i in range(0, len(all_ids), batch_size):
@@ -233,7 +230,8 @@ def cmd_repair(args):
         print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
 
     print(f"\n  Repair complete. {filed} drawers rebuilt.")
-    print(f"  Backup saved at {backup_path}")
+    if backup_path:
+        print(f"  Backup saved at {backup_path}")
     print(f"\n{'=' * 55}\n")
 
 
@@ -274,10 +272,11 @@ def cmd_mcp(args):
 
 def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
-    import chromadb
     from .dialect import Dialect
+    from .vector_store import get_collection
 
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    cfg = MempalaceConfig()
+    palace_path = os.path.expanduser(args.palace) if args.palace else cfg.palace_path
 
     # Load dialect (with optional entity config)
     config_path = args.config
@@ -295,8 +294,7 @@ def cmd_compress(args):
 
     # Connect to palace
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = get_collection(palace_path, config=cfg)
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
@@ -367,7 +365,12 @@ def cmd_compress(args):
     # Store compressed versions (unless dry-run)
     if not args.dry_run:
         try:
-            comp_col = client.get_or_create_collection("mempalace_compressed")
+            comp_col = get_collection(
+                palace_path,
+                config=cfg,
+                create=True,
+                collection_name="mempalace_compressed",
+            )
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
                 comp_meta["compression_ratio"] = round(stats["ratio"], 1)

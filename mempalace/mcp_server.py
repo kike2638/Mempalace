@@ -31,7 +31,7 @@ from .version import __version__
 from .query_sanitizer import sanitize_query
 from .searcher import search_memories
 from .palace_graph import traverse, find_tunnels, graph_stats
-import chromadb
+from .vector_store import get_collection as _get_vector_store
 
 from .knowledge_graph import KnowledgeGraph
 
@@ -62,10 +62,6 @@ if _args.palace:
     _kg = KnowledgeGraph(db_path=os.path.join(_config.palace_path, "knowledge_graph.sqlite3"))
 else:
     _kg = KnowledgeGraph()
-
-
-_client_cache = None
-_collection_cache = None
 
 
 # ==================== WRITE-AHEAD LOG ====================
@@ -101,28 +97,10 @@ def _wal_log(operation: str, params: dict, result: dict = None):
         logger.error(f"WAL write failed: {e}")
 
 
-_client_cache = None
-_collection_cache = None
-
-
-def _get_client():
-    """Return a singleton ChromaDB PersistentClient."""
-    global _client_cache
-    if _client_cache is None:
-        _client_cache = chromadb.PersistentClient(path=_config.palace_path)
-    return _client_cache
-
-
 def _get_collection(create=False):
-    """Return the ChromaDB collection, caching the client between calls."""
-    global _collection_cache
+    """Return the configured vector store collection, or None on failure."""
     try:
-        client = _get_client()
-        if create:
-            _collection_cache = client.get_or_create_collection(_config.collection_name)
-        elif _collection_cache is None:
-            _collection_cache = client.get_collection(_config.collection_name)
-        return _collection_cache
+        return _get_vector_store(_config.palace_path, config=_config, create=create)
     except Exception:
         return None
 
@@ -975,7 +953,7 @@ def handle_request(request):
             }
         # Coerce argument types based on input_schema.
         # MCP JSON transport may deliver integers as floats or strings;
-        # ChromaDB and Python slicing require native int.
+        # Vector store and Python slicing require native int.
         schema_props = TOOLS[tool_name]["input_schema"].get("properties", {})
         for key, value in list(tool_args.items()):
             prop_schema = schema_props.get(key, {})

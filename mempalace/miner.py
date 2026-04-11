@@ -15,7 +15,7 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-import chromadb
+from .vector_store import get_collection as _get_vector_store_collection
 
 from .palace import SKIP_DIRS, get_collection, file_already_mined
 
@@ -366,7 +366,7 @@ def chunk_text(content: str, source_file: str) -> list:
 
 
 # =============================================================================
-# PALACE — ChromaDB operations
+# PALACE — vector store operations
 # =============================================================================
 
 
@@ -579,7 +579,7 @@ def mine(
     print(f"{'─' * 55}\n")
 
     if not dry_run:
-        collection = get_collection(palace_path)
+        collection = _get_vector_store_collection(palace_path, create=True)
     else:
         collection = None
 
@@ -625,8 +625,7 @@ def mine(
 def status(palace_path: str):
     """Show what's been filed in the palace."""
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = _get_vector_store_collection(palace_path)
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")

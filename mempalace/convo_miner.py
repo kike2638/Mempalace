@@ -16,7 +16,8 @@ from datetime import datetime
 from collections import defaultdict
 
 from .normalize import normalize
-from .palace import SKIP_DIRS, get_collection, file_already_mined
+from .vector_store import get_collection as _get_vector_store_collection
+from .palace import SKIP_DIRS, file_already_mined
 
 
 # File types that might contain conversations
@@ -264,7 +265,7 @@ def mine_convos(
         print("  DRY RUN — nothing will be filed")
     print(f"{'-' * 55}\n")
 
-    collection = get_collection(palace_path) if not dry_run else None
+    collection = _get_vector_store_collection(palace_path, create=True) if not dry_run else None
 
     total_drawers = 0
     files_skipped = 0

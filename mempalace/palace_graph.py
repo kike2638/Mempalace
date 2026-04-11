@@ -12,27 +12,25 @@ Enables queries like:
   "Find all rooms connected to riley-college-apps"
   "What topics bridge wing_hardware and wing_myproject?"
 
-No external graph DB needed — built from ChromaDB metadata.
+No external graph DB needed — built from vector store metadata.
 """
 
 from collections import defaultdict, Counter
 from .config import MempalaceConfig
-
-import chromadb
+from .vector_store import get_collection as _get_vector_store
 
 
 def _get_collection(config=None):
     config = config or MempalaceConfig()
     try:
-        client = chromadb.PersistentClient(path=config.palace_path)
-        return client.get_collection(config.collection_name)
+        return _get_vector_store(config.palace_path, config=config)
     except Exception:
         return None
 
 
 def build_graph(col=None, config=None):
     """
-    Build the palace graph from ChromaDB metadata.
+    Build the palace graph from vector store metadata.
 
     Returns:
         nodes: dict of {room: {wings: set, halls: set, count: int}}
