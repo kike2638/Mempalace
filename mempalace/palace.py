@@ -7,6 +7,7 @@ Consolidates collection access patterns used by both miners and the MCP server.
 import os
 
 from .backends.chroma import ChromaBackend
+from .config import MempalaceConfig
 
 SKIP_DIRS = {
     ".git",
@@ -35,6 +36,26 @@ SKIP_DIRS = {
 }
 
 _DEFAULT_BACKEND = ChromaBackend()
+_POSTGRES_BACKENDS = {}
+
+
+def _select_backend():
+    config = MempalaceConfig()
+    if config.backend == "chroma":
+        return _DEFAULT_BACKEND
+
+    dsn = config.postgres_dsn
+    if not dsn:
+        raise RuntimeError(
+            "PostgreSQL backend selected but no DSN is configured. "
+            "Set MEMPALACE_POSTGRES_DSN or config.json postgres_dsn."
+        )
+
+    if dsn not in _POSTGRES_BACKENDS:
+        from .backends.postgres import PostgresBackend
+
+        _POSTGRES_BACKENDS[dsn] = PostgresBackend(dsn)
+    return _POSTGRES_BACKENDS[dsn]
 
 
 def get_collection(
@@ -43,7 +64,7 @@ def get_collection(
     create: bool = True,
 ):
     """Get the palace collection through the backend layer."""
-    return _DEFAULT_BACKEND.get_collection(
+    return _select_backend().get_collection(
         palace_path,
         collection_name=collection_name,
         create=create,

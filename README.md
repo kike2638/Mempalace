@@ -614,9 +614,32 @@ All commands accept `--palace <path>` to override the default location.
 {
   "palace_path": "/custom/path/to/palace",
   "collection_name": "mempalace_drawers",
+  "backend": "chroma",
   "people_map": {"Kai": "KAI", "Priya": "PRI"}
 }
 ```
+
+### Optional PostgreSQL backend
+
+ChromaDB is still the default zero-config backend and is the path used by the
+published raw-mode benchmark. PostgreSQL is an optional backend for large,
+long-lived, or team/server deployments where you want the palace in a managed
+database instead of a local Chroma directory.
+
+```bash
+pip install "mempalace[postgres]"
+
+export MEMPALACE_BACKEND=postgres
+export MEMPALACE_POSTGRES_DSN="postgresql://mempalace_user@host:5432/dbname"
+# optional, defaults to mempalace_drawers
+export MEMPALACE_COLLECTION_NAME=mempalace_drawers
+```
+
+The PostgreSQL backend requires either `pg_sorted_heap` or `pgvector` in the
+database. When both are available, MemPalace prefers `pg_sorted_heap` and stores
+drawers in a `sorted_heap` table keyed by `(wing, room, id)`, with
+`sorted_hnsw` vector search. If only `pgvector` is available, it falls back to a
+regular heap table plus `hnsw` vector index.
 
 ### Wing config (`~/.mempalace/wing_config.json`)
 
