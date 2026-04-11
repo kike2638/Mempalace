@@ -22,6 +22,7 @@ from .palace import SKIP_DIRS, get_collection, file_already_mined
 READABLE_EXTENSIONS = {
     ".txt",
     ".md",
+    ".rst",
     ".py",
     ".js",
     ".ts",
