@@ -18,11 +18,13 @@ class SearchError(Exception):
     """Raised when search cannot proceed (e.g. no palace found)."""
 
 
-def search(query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5):
+def search(query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5, min_similarity: float = 0.0):
     """
     Search the palace. Returns verbatim drawer content.
     Optionally filter by wing (project) or room (aspect).
     """
+    if not (-1.0 <= min_similarity <= 1.0):
+        raise ValueError(f"min_similarity must be between -1.0 and 1.0, got {min_similarity}")
     try:
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_collection("mempalace_drawers")
@@ -71,13 +73,17 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
         print(f"  Room: {room}")
     print(f"{'=' * 60}\n")
 
-    for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists), 1):
+    displayed = 0
+    for doc, meta, dist in zip(docs, metas, dists):
         similarity = round(1 - dist, 3)
+        if similarity < min_similarity:
+            continue
+        displayed += 1
         source = Path(meta.get("source_file", "?")).name
         wing_name = meta.get("wing", "?")
         room_name = meta.get("room", "?")
 
-        print(f"  [{i}] {wing_name} / {room_name}")
+        print(f"  [{displayed}] {wing_name} / {room_name}")
         print(f"      Source: {source}")
         print(f"      Match:  {similarity}")
         print()
@@ -87,16 +93,22 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
         print()
         print(f"  {'─' * 56}")
 
+    if displayed == 0:
+        print(f'\n  No results above similarity threshold ({min_similarity}) for: "{query}"')
+
     print()
 
 
 def search_memories(
-    query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5
+    query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5,
+    min_similarity: float = 0.0,
 ) -> dict:
     """
     Programmatic search — returns a dict instead of printing.
     Used by the MCP server and other callers that need data.
     """
+    if not (-1.0 <= min_similarity <= 1.0):
+        return {"error": f"min_similarity must be between -1.0 and 1.0, got {min_similarity}"}
     try:
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_collection("mempalace_drawers")
@@ -135,18 +147,22 @@ def search_memories(
 
     hits = []
     for doc, meta, dist in zip(docs, metas, dists):
+        similarity = round(1 - dist, 3)
+        if similarity < min_similarity:
+            continue
         hits.append(
             {
                 "text": doc,
                 "wing": meta.get("wing", "unknown"),
                 "room": meta.get("room", "unknown"),
                 "source_file": Path(meta.get("source_file", "?")).name,
-                "similarity": round(1 - dist, 3),
+                "similarity": similarity,
             }
         )
 
     return {
         "query": query,
         "filters": {"wing": wing, "room": room},
+        "total_before_filter": len(docs),
         "results": hits,
     }
