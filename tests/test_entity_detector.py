@@ -504,3 +504,22 @@ def test_detect_entities_picks_up_accented_names():
         assert "Inês" in all_names
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_extract_candidates_keeps_cara_and_caro_as_names():
+    # "cara" / "caro" appear in PERSON_VERB_PATTERNS_PTBR as direct-address
+    # markers, but they are also valid first names in English/Italian/Portuguese.
+    # STOPWORDS must not drop them before pattern scoring can run.
+    text = (
+        "Cara said hello to the team.\n"
+        "Cara laughed at the joke.\n"
+        "Cara smiled and waved.\n"
+        "Cara joined the standup.\n"
+        "Caro wrote the release notes.\n"
+        "Caro reviewed the PR.\n"
+        "Caro approved the merge.\n"
+        "Caro deployed the build.\n"
+    )
+    result = extract_candidates(text)
+    assert "Cara" in result
+    assert "Caro" in result

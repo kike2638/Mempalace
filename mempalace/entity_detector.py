@@ -366,8 +366,11 @@ STOPWORDS = {
     "olá",
     "obrigado",
     "obrigada",
-    "caro",
-    "cara",
+    # NOTE: "caro" / "cara" are intentionally NOT stopwords -- they are valid
+    # first names in English/Italian/Portuguese (Cara, Caro) and are already
+    # handled as direct-address markers in PERSON_VERB_PATTERNS_PTBR when they
+    # precede another name. Adding them here would silently drop "Cara" /
+    # "Caro" from candidate extraction.
     # UI/action words that appear in how-to content
     "click",
     "hit",
