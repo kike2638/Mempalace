@@ -57,8 +57,15 @@ def _count_human_messages(transcript_path: str) -> int:
                             if "<command-message>" in content:
                                 continue
                         elif isinstance(content, list):
+                            # Skip tool results (role: "user" but not human input)
+                            if all(
+                                isinstance(b, dict) and b.get("type") == "tool_result"
+                                for b in content
+                            ):
+                                continue
                             text = " ".join(
-                                b.get("text", "") for b in content if isinstance(b, dict)
+                                b.get("text", "")
+                                for b in content if isinstance(b, dict)
                             )
                             if "<command-message>" in text:
                                 continue
@@ -153,7 +160,9 @@ def hook_stop(data: dict, harness: str):
 
     since_last = exchange_count - last_save
 
-    _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save")
+    _log(
+        f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save"
+    )
 
     if since_last >= SAVE_INTERVAL and exchange_count > 0:
         # Update last save point
