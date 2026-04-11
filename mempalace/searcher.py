@@ -9,7 +9,7 @@ Returns verbatim text — the actual words, never summaries.
 import logging
 from pathlib import Path
 
-import chromadb
+from .palace import get_collection
 
 logger = logging.getLogger("mempalace_mcp")
 
@@ -24,12 +24,21 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     Optionally filter by wing (project) or room (aspect).
     """
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = get_collection(palace_path)
+    except ImportError:
+        print(f"\n  Palace at {palace_path} uses ChromaDB but 'chromadb' is not installed.")
+        print("  Install with: pip install 'mempalace[chroma]'")
+        print("  Or migrate:  mempalace migrate")
+        raise SearchError(f"Missing chromadb dependency for {palace_path}")
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         raise SearchError(f"No palace found at {palace_path}")
+
+    if col.count() == 0:
+        print(f"\n  Palace at {palace_path} exists but is empty.")
+        print("  Run: mempalace mine <dir>")
+        raise SearchError(f"Empty palace at {palace_path}")
 
     # Build where filter
     where = {}
@@ -98,13 +107,23 @@ def search_memories(
     Used by the MCP server and other callers that need data.
     """
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = get_collection(palace_path)
+    except ImportError:
+        return {
+            "error": "Missing chromadb dependency",
+            "hint": "pip install 'mempalace[chroma]' or run: mempalace migrate",
+        }
     except Exception as e:
         logger.error("No palace found at %s: %s", palace_path, e)
         return {
             "error": "No palace found",
             "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
+        }
+
+    if col.count() == 0:
+        return {
+            "error": "Empty palace",
+            "hint": "Run: mempalace mine <dir>",
         }
 
     # Build where filter
