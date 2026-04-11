@@ -827,16 +827,22 @@ class SynapseDB:
         query_embedding: list[float],
         max_expansions: int = 3,
         similarity_threshold: float = 0.65,
+        lookback_days: int = 60,
     ) -> dict[str, Any]:
         """過去の検索ログから類似クエリを見つけ、拡張キーワードを返す。"""
         qt_lower = query_text.lower()
         qt_words = set(qt_lower.replace(",", " ").split())
 
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(days=int(lookback_days))
+        cutoff = cutoff_dt.isoformat()
+
         conn = sqlite3.connect(self.db_path)
         rows: list[tuple[Any, ...]] = []
         try:
             cur = conn.execute(
-                "SELECT query_text, query_embedding, result_ids, result_scores FROM query_log"
+                "SELECT query_text, query_embedding, result_ids, result_scores FROM query_log "
+                "WHERE timestamp > ? ORDER BY timestamp DESC",
+                (cutoff,),
             )
             rows = cur.fetchall()
         finally:
@@ -896,6 +902,7 @@ class SynapseDB:
             "past_query_rows": len(rows),
             "similar_query_matches": len(similar_past),
             "unique_source_drawers": len(source_ids),
+            "lookback_days": int(lookback_days),
         }
         return {
             "applied": bool(similar_past) or bool(expansion_terms),

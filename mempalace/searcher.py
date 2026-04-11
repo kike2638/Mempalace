@@ -297,6 +297,7 @@ def search_memories(
                     similarity_threshold=float(
                         pd.get("query_expansion_similarity_threshold", 0.65)
                     ),
+                    lookback_days=int(pd.get("query_expansion_lookback_days", 60)),
                 )
                 expanded_terms = er.get("expansion_terms") or []
                 boost = float(pd.get("query_expansion_boost", 0.7))

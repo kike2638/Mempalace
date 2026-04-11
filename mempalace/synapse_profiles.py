@@ -46,6 +46,7 @@ HARDCODED_DEFAULTS: Dict[str, Any] = {
     "query_expansion_max_terms": 3,
     "query_expansion_similarity_threshold": 0.65,
     "query_expansion_boost": 0.7,
+    "query_expansion_lookback_days": 60,
     # Phase 8 — Supersede detection (opt-in)
     "supersede_filter_enabled": False,
     "supersede_similarity_threshold": 0.86,
@@ -266,6 +267,12 @@ class ProfileManager:
         if qeb is not None and (qeb < 0.0 or qeb > 1.0):
             errors.append(
                 f"query_expansion_boost must be between 0.0 and 1.0, got {qeb}"
+            )
+
+        qel = merged.get("query_expansion_lookback_days")
+        if qel is not None and qel < 1:
+            errors.append(
+                f"query_expansion_lookback_days must be >= 1, got {qel}"
             )
 
         sst = merged.get("supersede_similarity_threshold")

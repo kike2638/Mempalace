@@ -520,6 +520,49 @@ class TestQueryExpansion:
         assert "similar_past_queries" in ex
         assert "expansion_terms" in ex
 
+    def test_expansion_lookback_ignores_old_logs(self, adv_palace, adv_col):
+        """lookback window 外の古いログが無視されることを確認。"""
+        adv_col.add(
+            ids=["drawer_A", "drawer_B"],
+            documents=["OAuth mobile app", "REST API auth"],
+            metadatas=[
+                {"wing": "w", "room": "r", "title": "OAuth mobile"},
+                {"wing": "w", "room": "r", "title": "REST API"},
+            ],
+        )
+        db = SynapseDB(adv_palace)
+        shared = [0.25] * 64
+        db.log_query("OAuth flow for mobile", shared, ["drawer_A"], [0.9])
+        db.log_query("REST API authentication", shared, ["drawer_B"], [0.9])
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        conn = sqlite3.connect(db.db_path)
+        conn.execute(
+            "UPDATE query_log SET timestamp = ? WHERE query_text = ?",
+            (old_ts, "OAuth flow for mobile"),
+        )
+        conn.commit()
+        conn.close()
+
+        ex = db.expand_query(
+            adv_col,
+            "auth design",
+            shared,
+            max_expansions=5,
+            similarity_threshold=0.0,
+            lookback_days=60,
+        )
+        past = ex.get("similar_past_queries") or []
+        assert "OAuth flow for mobile" not in past
+        assert "REST API authentication" in past
+        assert ex.get("metadata", {}).get("lookback_days") == 60
+        terms_blob = " ".join(ex.get("expansion_terms") or []).lower()
+        assert "oauth" not in terms_blob
+
+    def test_expansion_lookback_default_in_profile(self):
+        """HARDCODED_DEFAULTS に query_expansion_lookback_days=60 が存在することを確認。"""
+        assert HARDCODED_DEFAULTS.get("query_expansion_lookback_days") == 60
+
 
 # --- Phase 8: Supersede ---
 
