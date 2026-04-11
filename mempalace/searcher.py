@@ -7,7 +7,9 @@ Returns verbatim text — the actual words, never summaries.
 """
 
 import hashlib
+import json
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -167,6 +169,7 @@ def search_memories(
     """
     from .config import MempalaceConfig
 
+    _pipeline_start = time.monotonic()
     cfg = MempalaceConfig()
     if palace_path is None:
         palace_path = cfg.palace_path
@@ -279,6 +282,7 @@ def search_memories(
             synapse_db = SynapseDB(palace_path)
             query_hash = hashlib.sha256(query.encode()).hexdigest()[:16]
             session_id = uuid.uuid4().hex[:16]
+            total_candidates_in = 0
 
             query_embedding = _embed_query_text(col, query)
 
@@ -351,6 +355,7 @@ def search_memories(
                         logger.warning("expansion query failed: %s", ex)
 
             result["hits"] = list(merged_by_id.values())
+            total_candidates_in = len(merged_by_id)
             if expansion_metadata.get("applied"):
                 expansion_metadata["results_from_original"] = len(original_ids)
                 expansion_metadata["results_from_expansion"] = max(
@@ -465,60 +470,142 @@ def search_memories(
                 if pd.get("include_consolidated_summaries", True):
                     include_sources = pd.get("include_consolidated_sources", False)
                     consolidated_removed: list[str] = []
-                    new_hits: list[dict[str, Any]] = []
-                    to_fetch_summary: list[str] = []
-                    for hit in hits_after_score:
-                        meta = hit.get("metadata") or {}
-                        if meta.get("status") == "consolidated":
-                            if include_sources:
-                                hit = dict(hit)
-                                into = meta.get("consolidated_into", "unknown")
-                                hit["synapse_consolidated_note"] = (
-                                    f"This drawer was consolidated into {into}"
-                                )
-                                new_hits.append(hit)
+                    consolidated_sources_nested = 0
+
+                    if include_sources:
+                        source_groups: dict[str, list[dict[str, Any]]] = {}
+                        non_consolidated_hits: list[dict[str, Any]] = []
+                        for hit in hits_after_score:
+                            meta = hit.get("metadata") or {}
+                            st = meta.get("status", "active")
+                            if st == "consolidated":
+                                into = meta.get("consolidated_into") or ""
+                                if into:
+                                    consolidated_sources_nested += 1
+                                    text = hit.get("text") or ""
+                                    source_groups.setdefault(into, []).append(
+                                        {
+                                            "id": hit.get("id", ""),
+                                            "title": meta.get("title", text[:50]),
+                                            "date": meta.get(
+                                                "created_at",
+                                                meta.get("filed_at", ""),
+                                            ),
+                                            "content_preview": text[:200],
+                                        }
+                                    )
+                                else:
+                                    non_consolidated_hits.append(hit)
                             else:
+                                non_consolidated_hits.append(hit)
+
+                        present = {h.get("id") for h in non_consolidated_hits}
+                        for cid in dict.fromkeys(list(source_groups.keys())):
+                            if cid and cid not in present:
+                                try:
+                                    got = col.get(
+                                        ids=[cid],
+                                        include=["documents", "metadatas", "embeddings"],
+                                    )
+                                    if got.get("ids"):
+                                        doc = (got.get("documents") or [""])[0]
+                                        meta = (got.get("metadatas") or [{}])[0] or {}
+                                        emb = (got.get("embeddings") or [None])[0]
+                                        dist = 0.5
+                                        nh = _chroma_rows_to_hits(
+                                            [doc],
+                                            [meta],
+                                            [dist],
+                                            [cid],
+                                            from_expansion=False,
+                                            embeddings_row=[emb] if emb else None,
+                                        )[0]
+                                        nh["similarity"] = 0.5
+                                        nh["synapse_score"] = 0.5
+                                        non_consolidated_hits.append(nh)
+                                        present.add(cid)
+                                except Exception:
+                                    pass
+
+                        for hit in non_consolidated_hits:
+                            meta = hit.get("metadata") or {}
+                            if meta.get("status") == "consolidated_summary":
+                                cid = hit.get("id", "")
+                                if cid in source_groups:
+                                    hit["synapse_consolidation"] = {
+                                        "is_consolidated": True,
+                                        "source_count": len(source_groups[cid]),
+                                        "sources": source_groups[cid],
+                                    }
+                                elif meta.get("source_drawers"):
+                                    try:
+                                        sids = json.loads(meta["source_drawers"])
+                                        if isinstance(sids, list):
+                                            hit["synapse_consolidation"] = {
+                                                "is_consolidated": True,
+                                                "source_count": len(sids),
+                                                "sources": [{"id": sid} for sid in sids],
+                                            }
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+
+                        hits_after_score = non_consolidated_hits
+                        consolidation_metadata = {
+                            "applied": True,
+                            "consolidated_sources_hidden": 0,
+                            "consolidated_sources_nested": consolidated_sources_nested,
+                            "include_sources_as_metadata": True,
+                            "include_sources": True,
+                        }
+                    else:
+                        new_hits: list[dict[str, Any]] = []
+                        to_fetch_summary: list[str] = []
+                        for hit in hits_after_score:
+                            meta = hit.get("metadata") or {}
+                            if meta.get("status") == "consolidated":
                                 consolidated_removed.append(hit.get("id", ""))
                                 into = meta.get("consolidated_into")
                                 if into:
                                     to_fetch_summary.append(str(into))
-                        else:
-                            new_hits.append(hit)
+                            else:
+                                new_hits.append(hit)
 
-                    present = {h.get("id") for h in new_hits}
-                    for cid in dict.fromkeys(to_fetch_summary):
-                        if cid and cid not in present:
-                            try:
-                                got = col.get(
-                                    ids=[cid],
-                                    include=["documents", "metadatas", "embeddings"],
-                                )
-                                if got.get("ids"):
-                                    doc = (got.get("documents") or [""])[0]
-                                    meta = (got.get("metadatas") or [{}])[0] or {}
-                                    emb = (got.get("embeddings") or [None])[0]
-                                    dist = 0.5
-                                    nh = _chroma_rows_to_hits(
-                                        [doc],
-                                        [meta],
-                                        [dist],
-                                        [cid],
-                                        from_expansion=False,
-                                        embeddings_row=[emb] if emb else None,
-                                    )[0]
-                                    nh["similarity"] = 0.5
-                                    nh["synapse_score"] = 0.5
-                                    new_hits.append(nh)
-                                    present.add(cid)
-                            except Exception:
-                                pass
+                        present = {h.get("id") for h in new_hits}
+                        for cid in dict.fromkeys(to_fetch_summary):
+                            if cid and cid not in present:
+                                try:
+                                    got = col.get(
+                                        ids=[cid],
+                                        include=["documents", "metadatas", "embeddings"],
+                                    )
+                                    if got.get("ids"):
+                                        doc = (got.get("documents") or [""])[0]
+                                        meta = (got.get("metadatas") or [{}])[0] or {}
+                                        emb = (got.get("embeddings") or [None])[0]
+                                        dist = 0.5
+                                        nh = _chroma_rows_to_hits(
+                                            [doc],
+                                            [meta],
+                                            [dist],
+                                            [cid],
+                                            from_expansion=False,
+                                            embeddings_row=[emb] if emb else None,
+                                        )[0]
+                                        nh["similarity"] = 0.5
+                                        nh["synapse_score"] = 0.5
+                                        new_hits.append(nh)
+                                        present.add(cid)
+                                except Exception:
+                                    pass
 
-                    hits_after_score = new_hits
-                    consolidation_metadata = {
-                        "applied": True,
-                        "consolidated_sources_hidden": len(consolidated_removed),
-                        "include_sources": include_sources,
-                    }
+                        hits_after_score = new_hits
+                        consolidation_metadata = {
+                            "applied": True,
+                            "consolidated_sources_hidden": len(consolidated_removed),
+                            "consolidated_sources_nested": 0,
+                            "include_sources_as_metadata": False,
+                            "include_sources": False,
+                        }
                 result["synapse_consolidation"] = consolidation_metadata
 
                 # Phase 5 — MMR
@@ -539,6 +626,44 @@ def search_memories(
 
                 result["hits"] = hits_after_score
                 result["results"] = hits_after_score
+
+                phases_applied: list[str] = []
+                phases_skipped: list[str] = []
+                if result.get("synapse_query_expansion", {}).get("applied"):
+                    phases_applied.append("query_expansion")
+                else:
+                    phases_skipped.append("query_expansion")
+
+                ss = result.get("synapse_supersede") or {}
+                if ss.get("checked"):
+                    phases_applied.append(
+                        "supersede_" + str(ss.get("action", "filter"))
+                    )
+                else:
+                    phases_skipped.append("supersede")
+
+                sc = result.get("synapse_consolidation") or {}
+                if sc.get("applied"):
+                    phases_applied.append("consolidation")
+                else:
+                    phases_skipped.append("consolidation")
+
+                sm = result.get("synapse_mmr") or {}
+                if sm.get("applied"):
+                    phases_applied.append("mmr")
+                else:
+                    phases_skipped.append("mmr")
+
+                result["synapse_pipeline"] = {
+                    "phases_applied": phases_applied,
+                    "phases_skipped": phases_skipped,
+                    "total_candidates_in": total_candidates_in,
+                    "total_results_out": len(hits_after_score),
+                    "profile_used": result.get("synapse_profile_used", "default"),
+                    "elapsed_ms": round(
+                        (time.monotonic() - _pipeline_start) * 1000, 1
+                    ),
+                }
 
                 if cfg.synapse_log_retrievals:
                     log_ids = [
@@ -581,5 +706,8 @@ def search_memories(
         result["synapse_supersede"] = {"checked": False}
         result["synapse_consolidation"] = {"applied": False}
         result["synapse_mmr"] = {"applied": False}
+
+    if not result.get("synapse_enabled"):
+        result.pop("synapse_pipeline", None)
 
     return result

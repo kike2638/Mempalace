@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -328,6 +329,83 @@ class TestPinnedMemory:
         assert pm.resolve("default").to_dict()["pinned_max_tokens"] == 2000
         assert pm.resolve("decide").to_dict()["pinned_max_tokens"] == 1000
         assert pm.resolve("decide").to_dict()["pinned_max_items"] == 3
+
+    def test_pinned_spread_boosts_cross_wing_drawer(self, adv_palace, adv_col):
+        adv_col.add(
+            ids=["drawer_A", "drawer_B"],
+            documents=["a", "b"],
+            metadatas=[
+                {"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()},
+                {"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()},
+            ],
+        )
+        db = SynapseDB(adv_palace)
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(db.db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO synapse_stats "
+            "(drawer_id, total_retrievals, recent_density, ltp_score, last_updated) "
+            "VALUES (?,?,?,?,?)",
+            ("drawer_A", 10, 0.0, 3.0, now),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO synapse_stats "
+            "(drawer_id, total_retrievals, recent_density, ltp_score, last_updated) "
+            "VALUES (?,?,?,?,?)",
+            ("drawer_B", 10, 0.0, 3.5, now),
+        )
+        conn.commit()
+        conn.close()
+        emb = [0.1] * 8
+        db.log_query("query_one", emb, ["drawer_A"], [1.0])
+        db.log_query("query_two", emb, ["drawer_A"], [1.0])
+        db.log_query("query_three", emb, ["drawer_A"], [1.0])
+        for _ in range(5):
+            db.log_query("same_query", emb, ["drawer_B"], [1.0])
+        assert db.get_retrieval_spread("drawer_A") >= 3
+        assert db.get_retrieval_spread("drawer_B") == 1
+        res = db.get_pinned_memories(adv_col, ltp_threshold=1.0, max_items=5, max_tokens=10000)
+        by_id = {p["drawer_id"]: p for p in res["pinned_memories"]}
+        assert by_id["drawer_A"]["retrieval_spread"] >= 3
+        assert by_id["drawer_B"]["retrieval_spread"] == 1
+        assert abs(by_id["drawer_A"]["pinning_score"] - 4.8) < 0.01
+        assert abs(by_id["drawer_B"]["pinning_score"] - 4.2) < 0.01
+        assert res["pinned_memories"][0]["drawer_id"] == "drawer_A"
+
+    def test_pinned_spread_field_in_response(self, adv_palace, adv_col):
+        adv_col.add(
+            ids=["pf1"],
+            documents=["c"],
+            metadatas=[{"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()}],
+        )
+        db = SynapseDB(adv_palace)
+        for _ in range(5):
+            db.log_retrieval(["pf1"], "q", "s")
+        db.refresh_stats(window_days=30, ltp_max_boost=2.0)
+        res = db.get_pinned_memories(adv_col, ltp_threshold=1.0)
+        assert res["pinned_memories"]
+        p = res["pinned_memories"][0]
+        assert "retrieval_spread" in p
+        assert "pinning_score" in p
+
+    def test_pinned_spread_minimum_is_one(self, adv_palace, adv_col):
+        adv_col.add(
+            ids=["lonely"],
+            documents=["z"],
+            metadatas=[{"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()}],
+        )
+        db = SynapseDB(adv_palace)
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(db.db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO synapse_stats "
+            "(drawer_id, total_retrievals, recent_density, ltp_score, last_updated) "
+            "VALUES (?,?,?,?,?)",
+            ("lonely", 5, 0.0, 2.0, now),
+        )
+        conn.commit()
+        conn.close()
+        assert db.get_retrieval_spread("lonely") == 1
 
 
 # --- Phase 7: Query expansion ---
@@ -735,8 +813,80 @@ class TestConsolidationEngine:
         SynapseDB(palace).consolidate(col, ["b1", "b2"], "pq")
         with patch("mempalace.config.MempalaceConfig", return_value=cfg):
             r = search_memories("p", palace_path=palace, n_results=10)
-        statuses = [h.get("metadata", {}).get("status") for h in r.get("hits", [])]
-        assert "consolidated" in statuses or r["synapse_consolidation"].get("include_sources")
+        assert r["synapse_consolidation"].get("include_sources_as_metadata") is True
+        top = [h for h in r.get("hits", []) if h.get("metadata", {}).get("status") == "consolidated"]
+        assert top == []
+        summ = next(
+            (
+                h
+                for h in r.get("hits", [])
+                if h.get("metadata", {}).get("status") == "consolidated_summary"
+            ),
+            None,
+        )
+        assert summ is not None
+        assert (summ.get("synapse_consolidation") or {}).get("source_count") == 2
+
+    def test_consolidated_sources_nested_in_evaluate(self, tmp_path):
+        palace = str(tmp_path / "palace")
+        os.makedirs(palace, exist_ok=True)
+        cfg = _synapse_cfg()
+        with open(os.path.join(palace, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {"synapse_profiles": {"default": {"include_consolidated_sources": True}}},
+                f,
+            )
+        client = chromadb.PersistentClient(path=palace)
+        col = client.get_or_create_collection("mempalace_drawers")
+        col.add(
+            ids=["n1", "n2", "n3"],
+            documents=["alpha beta", "alpha gamma", "alpha delta"],
+            metadatas=[
+                {"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()}
+                for _ in range(3)
+            ],
+        )
+        cid = SynapseDB(palace).consolidate(col, ["n1", "n2", "n3"], "alpha summary merged")[
+            "consolidated_drawer_id"
+        ]
+        with patch("mempalace.config.MempalaceConfig", return_value=cfg):
+            out = search_memories("alpha", palace_path=palace, n_results=10)
+        top_ids = [h["id"] for h in out["hits"]]
+        assert "n1" not in top_ids and "n2" not in top_ids and "n3" not in top_ids
+        summ = next((h for h in out["hits"] if h["id"] == cid), None)
+        assert summ is not None
+        sc = summ.get("synapse_consolidation") or {}
+        assert sc.get("source_count") == 3
+        assert len(sc.get("sources") or []) == 3
+
+    def test_consolidated_sources_not_nested_in_orient(self, tmp_path):
+        palace = str(tmp_path / "palace")
+        os.makedirs(palace, exist_ok=True)
+        cfg = _synapse_cfg()
+        with open(os.path.join(palace, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {"synapse_profiles": {"default": {"include_consolidated_sources": False}}},
+                f,
+            )
+        client = chromadb.PersistentClient(path=palace)
+        col = client.get_or_create_collection("mempalace_drawers")
+        col.add(
+            ids=["o1", "o2", "o3"],
+            documents=["gamma ray", "gamma ray", "gamma ray"],
+            metadatas=[
+                {"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()}
+                for _ in range(3)
+            ],
+        )
+        cid = SynapseDB(palace).consolidate(col, ["o1", "o2", "o3"], "gamma merged")[
+            "consolidated_drawer_id"
+        ]
+        with patch("mempalace.config.MempalaceConfig", return_value=cfg):
+            out = search_memories("gamma", palace_path=palace, n_results=10)
+        assert cid in [h["id"] for h in out["hits"]]
+        for h in out["hits"]:
+            if h["id"] == cid:
+                assert not (h.get("synapse_consolidation") or {}).get("sources")
 
     def test_consolidate_observability_fields(self, adv_palace, adv_col):
         adv_col.add(
@@ -747,3 +897,113 @@ class TestConsolidationEngine:
         r = SynapseDB(adv_palace).consolidate(adv_col, ["e1"], "s")
         for k in ("consolidated_drawer_id", "source_drawers_archived", "reversible"):
             assert k in r
+
+
+# --- Pipeline trace ---
+
+
+class TestPipelineTrace:
+    """Pipeline trace observability tests."""
+
+    def test_pipeline_trace_present_when_synapse_enabled(self, adv_palace):
+        cfg = _synapse_cfg()
+        client = chromadb.PersistentClient(path=adv_palace)
+        col = client.get_or_create_collection("mempalace_drawers")
+        col.add(
+            ids=["pt1"],
+            documents=["hello pipeline"],
+            metadatas=[{"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()}],
+        )
+        with patch("mempalace.config.MempalaceConfig", return_value=cfg):
+            r = search_memories("hello", palace_path=adv_palace, n_results=5)
+        pipe = r.get("synapse_pipeline") or {}
+        assert isinstance(pipe.get("phases_applied"), list)
+        assert isinstance(pipe.get("phases_skipped"), list)
+        assert isinstance(pipe.get("total_candidates_in"), int)
+        assert isinstance(pipe.get("total_results_out"), int)
+        assert isinstance(pipe.get("profile_used"), str)
+        assert isinstance(pipe.get("elapsed_ms"), (int, float))
+
+    def test_pipeline_trace_phases_match_config(self, tmp_path):
+        palace = str(tmp_path / "palace")
+        os.makedirs(palace, exist_ok=True)
+        cfg = _synapse_cfg()
+        with open(os.path.join(palace, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "synapse_profiles": {
+                        "default": {
+                            "mmr_enabled": True,
+                            "query_expansion_enabled": False,
+                            "supersede_filter_enabled": True,
+                            "supersede_action": "filter",
+                        }
+                    }
+                },
+                f,
+            )
+        client = chromadb.PersistentClient(path=palace)
+        col = client.get_or_create_collection("mempalace_drawers")
+        col.add(
+            ids=["pv1"],
+            documents=["unique pipeline test string"],
+            metadatas=[{"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()}],
+        )
+        with patch("mempalace.config.MempalaceConfig", return_value=cfg):
+            r = search_memories("unique pipeline", palace_path=palace, n_results=5)
+        pipe = r["synapse_pipeline"]
+        assert "mmr" in pipe["phases_applied"]
+        assert "supersede_filter" in pipe["phases_applied"]
+        assert "query_expansion" in pipe["phases_skipped"]
+
+    def test_pipeline_trace_absent_when_synapse_disabled(self, adv_palace):
+        cfg = _synapse_cfg(synapse_enabled=False)
+        client = chromadb.PersistentClient(path=adv_palace)
+        col = client.get_or_create_collection("mempalace_drawers")
+        col.add(
+            ids=["off1"],
+            documents=["x"],
+            metadatas=[{"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()}],
+        )
+        with patch("mempalace.config.MempalaceConfig", return_value=cfg):
+            r = search_memories("x", palace_path=adv_palace, n_results=3)
+        assert "synapse_pipeline" not in r or not (r.get("synapse_pipeline") or {}).get(
+            "phases_applied"
+        )
+
+    def test_pipeline_trace_elapsed_ms_is_number(self, adv_palace):
+        cfg = _synapse_cfg()
+        client = chromadb.PersistentClient(path=adv_palace)
+        col = client.get_or_create_collection("mempalace_drawers")
+        col.add(
+            ids=["e1"],
+            documents=["elapsed test"],
+            metadatas=[{"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()}],
+        )
+        with patch("mempalace.config.MempalaceConfig", return_value=cfg):
+            r = search_memories("elapsed", palace_path=adv_palace, n_results=3)
+        assert r["synapse_pipeline"]["elapsed_ms"] >= 0.0
+
+    def test_pipeline_trace_candidate_count_consistent(self, tmp_path):
+        palace = str(tmp_path / "palace")
+        os.makedirs(palace, exist_ok=True)
+        cfg = _synapse_cfg()
+        with open(os.path.join(palace, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {"synapse_profiles": {"default": {"mmr_enabled": True, "mmr_final_k": 1}}},
+                f,
+            )
+        client = chromadb.PersistentClient(path=palace)
+        col = client.get_or_create_collection("mempalace_drawers")
+        for i in range(4):
+            col.add(
+                ids=[f"mm{i}"],
+                documents=[f"token {i} same topic"],
+                metadatas=[
+                    {"wing": "w", "room": "r", "filed_at": datetime.now(timezone.utc).isoformat()}
+                ],
+            )
+        with patch("mempalace.config.MempalaceConfig", return_value=cfg):
+            r = search_memories("token same topic", palace_path=palace, n_results=5)
+        pipe = r["synapse_pipeline"]
+        assert pipe["total_candidates_in"] >= pipe["total_results_out"]

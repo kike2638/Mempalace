@@ -413,6 +413,7 @@ def tool_search(
             "synapse_requested_profile": result.get("synapse_requested_profile"),
             "synapse_profile_used": result.get("synapse_profile_used"),
             "synapse_mmr": result.get("synapse_mmr"),
+            "synapse_pipeline": result.get("synapse_pipeline"),
         }
         result = {**result, "response_meta": response_meta}
     return result

@@ -942,6 +942,27 @@ class SynapseDB:
         finally:
             conn.close()
 
+    def get_retrieval_spread(self, drawer_id: str) -> int:
+        """
+        query_log 上で drawer_id が結果に含まれた異なる query_text の数（近似 spread）。
+        0 件なら 1 を返す。
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.execute("SELECT query_text, result_ids FROM query_log")
+            distinct: set[str] = set()
+            for qtext, rids_blob in cur.fetchall():
+                try:
+                    rids = json.loads(rids_blob)
+                    if isinstance(rids, list) and drawer_id in rids:
+                        distinct.add(str(qtext))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+            n = len(distinct)
+            return n if n > 0 else 1
+        finally:
+            conn.close()
+
     def get_recently_tagged_drawer_ids(
         self, collection: Any, tagged_window_hours: int
     ) -> list[str]:
@@ -1019,11 +1040,21 @@ class SynapseDB:
                 }
             merged[did]["from_tagged"] = True
 
+        pool_n = len(merged)
+        for did in merged:
+            spread = self.get_retrieval_spread(did)
+            capped = min(int(spread), 10)
+            ltp = float(merged[did]["ltp_score"])
+            pinning = ltp * (1.0 + 0.2 * float(capped))
+            merged[did]["retrieval_spread"] = spread
+            merged[did]["pinning_score"] = pinning
+
         ordered = sorted(
             merged.keys(),
-            key=lambda d: merged[d]["ltp_score"],
+            key=lambda d: float(merged[d]["pinning_score"]),
             reverse=True,
         )
+        pinning_ranks = {did: i + 1 for i, did in enumerate(ordered)}
 
         pinned: list[dict[str, Any]] = []
         total_tokens = 0
@@ -1044,11 +1075,15 @@ class SynapseDB:
                 break
             title = meta.get("title") or content[:50]
             info = merged[did]
+            prank = pinning_ranks.get(did, 0)
+            spread = int(info.get("retrieval_spread", 1))
+            pscore = float(info.get("pinning_score", info["ltp_score"]))
+            ltp_disp = float(info["ltp_score"])
             reasons: list[str] = []
-            if info.get("from_ltp"):
-                reasons.append(
-                    f"ltp_score >= {ltp_threshold} (rank {info['ltp_rank']} of {info['ltp_pool']})"
-                )
+            reasons.append(
+                f"ltp_score={ltp_disp:.2f}, spread={spread}, pinning_score={pscore:.2f} "
+                f"(rank {prank} of {pool_n})"
+            )
             if info.get("from_tagged"):
                 reasons.append(f"tagged within {tagged_window_hours}h")
             pinned_reason = "; ".join(reasons) if reasons else "pinned"
@@ -1057,6 +1092,8 @@ class SynapseDB:
                 "title": str(title),
                 "content_preview": content[:200],
                 "ltp_score": float(info["ltp_score"]),
+                "retrieval_spread": spread,
+                "pinning_score": pscore,
                 "retrieval_count": self._drawer_retrieval_count(did),
                 "last_retrieved": self._drawer_last_retrieved(did),
                 "pinned_reason": pinned_reason,
