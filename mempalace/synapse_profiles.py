@@ -13,7 +13,9 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-VALID_AXES = frozenset({"ltp", "tagging", "association", "similarity", "decay", "recency"})
+VALID_AXES = frozenset(
+    {"ltp", "tagging", "association", "similarity", "decay", "recency", "mmr"}
+)
 
 HARDCODED_DEFAULTS: Dict[str, Any] = {
     "description": "",
@@ -28,6 +30,32 @@ HARDCODED_DEFAULTS: Dict[str, Any] = {
     "association_max_boost": 1.4,
     "association_coefficient": 0.2,
     "axes_enabled": ["ltp", "tagging", "association"],
+    # Phase 5 — MMR (opt-in)
+    "mmr_enabled": False,
+    "mmr_lambda": 0.7,
+    "mmr_final_k": 5,
+    # Phase 6 — Pinned memory (opt-in)
+    "pinned_memory_enabled": False,
+    "pinned_max_tokens": 2000,
+    "pinned_max_items": 5,
+    "pinned_ltp_threshold": 1.5,
+    "pinned_include_tagged": True,
+    "pinned_tagged_window_hours": 48,
+    # Phase 7 — Query expansion (opt-in)
+    "query_expansion_enabled": False,
+    "query_expansion_max_terms": 3,
+    "query_expansion_similarity_threshold": 0.65,
+    "query_expansion_boost": 0.7,
+    # Phase 8 — Supersede detection (opt-in)
+    "supersede_filter_enabled": False,
+    "supersede_similarity_threshold": 0.86,
+    "supersede_min_age_gap_days": 7,
+    "supersede_action": "filter",
+    "supersede_max_candidates": 10,
+    # Phase 9 — Consolidation in search results
+    "include_consolidated_summaries": True,
+    "include_consolidated_sources": False,
+    "consolidation_suggestions_in_status": True,
 }
 
 
@@ -195,6 +223,74 @@ class ProfileManager:
         twh = merged.get("tagging_window_hours")
         if twh is not None and twh <= 0:
             errors.append(f"tagging_window_hours must be > 0, got {twh}")
+
+        mlam = merged.get("mmr_lambda")
+        if mlam is not None and (mlam < 0.0 or mlam > 1.0):
+            errors.append(f"mmr_lambda must be between 0.0 and 1.0, got {mlam}")
+
+        mmfk = merged.get("mmr_final_k")
+        if mmfk is not None and (
+            not isinstance(mmfk, int) or isinstance(mmfk, bool) or mmfk < 1
+        ):
+            errors.append(f"mmr_final_k must be an integer >= 1, got {mmfk}")
+
+        pmt = merged.get("pinned_max_tokens")
+        if pmt is not None and (not isinstance(pmt, int) or pmt < 1):
+            errors.append(f"pinned_max_tokens must be an integer >= 1, got {pmt}")
+
+        pmi = merged.get("pinned_max_items")
+        if pmi is not None and (not isinstance(pmi, int) or pmi < 1):
+            errors.append(f"pinned_max_items must be an integer >= 1, got {pmi}")
+
+        plt = merged.get("pinned_ltp_threshold")
+        if plt is not None and plt < 0.0:
+            errors.append(f"pinned_ltp_threshold must be >= 0.0, got {plt}")
+
+        ptwh = merged.get("pinned_tagged_window_hours")
+        if ptwh is not None and ptwh <= 0:
+            errors.append(f"pinned_tagged_window_hours must be > 0, got {ptwh}")
+
+        qemt = merged.get("query_expansion_max_terms")
+        if qemt is not None and (not isinstance(qemt, int) or qemt < 1):
+            errors.append(
+                f"query_expansion_max_terms must be an integer >= 1, got {qemt}"
+            )
+
+        qest = merged.get("query_expansion_similarity_threshold")
+        if qest is not None and (qest < 0.0 or qest > 1.0):
+            errors.append(
+                f"query_expansion_similarity_threshold must be between 0.0 and 1.0, got {qest}"
+            )
+
+        qeb = merged.get("query_expansion_boost")
+        if qeb is not None and (qeb < 0.0 or qeb > 1.0):
+            errors.append(
+                f"query_expansion_boost must be between 0.0 and 1.0, got {qeb}"
+            )
+
+        sst = merged.get("supersede_similarity_threshold")
+        if sst is not None and (sst < 0.0 or sst > 1.0):
+            errors.append(
+                f"supersede_similarity_threshold must be between 0.0 and 1.0, got {sst}"
+            )
+
+        smag = merged.get("supersede_min_age_gap_days")
+        if smag is not None and (not isinstance(smag, int) or smag < 0):
+            errors.append(
+                f"supersede_min_age_gap_days must be an integer >= 0, got {smag}"
+            )
+
+        sa = merged.get("supersede_action")
+        if sa is not None and sa not in ("filter", "annotate"):
+            errors.append(
+                f'supersede_action must be "filter" or "annotate", got {sa!r}'
+            )
+
+        smc = merged.get("supersede_max_candidates")
+        if smc is not None and (not isinstance(smc, int) or smc < 1):
+            errors.append(
+                f"supersede_max_candidates must be an integer >= 1, got {smc}"
+            )
 
         if errors:
             raise ValueError(

@@ -25,7 +25,7 @@ import logging
 import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from .config import MempalaceConfig, sanitize_name, sanitize_content
 from .version import __version__
@@ -37,6 +37,7 @@ from .knowledge_graph import KnowledgeGraph
 from .synapse import (
     SYNAPSE_MARK_METADATA_KEY,
     SYNAPSE_MARK_NEW,
+    SynapseDB,
     build_soft_archive_proposal,
 )
 
@@ -411,9 +412,117 @@ def tool_search(
         response_meta = {
             "synapse_requested_profile": result.get("synapse_requested_profile"),
             "synapse_profile_used": result.get("synapse_profile_used"),
+            "synapse_mmr": result.get("synapse_mmr"),
         }
         result = {**result, "response_meta": response_meta}
     return result
+
+
+def tool_session_context():
+    """
+    MCP tool: mempalace_session_context — pinned memories and maintenance hints for session start.
+    """
+    cfg = MempalaceConfig()
+    if not cfg.synapse_enabled:
+        return {
+            "pinned_memories": [],
+            "pinned_count": 0,
+            "pinned_total_tokens": 0,
+            "consolidation_suggestions": [],
+            "supersede_suggestions": {"candidates": [], "checked": False},
+            "synapse_enabled": False,
+        }
+    col = _get_collection()
+    if not col:
+        return _no_palace()
+    from .synapse_profiles import ProfileManager, global_merged_from_mempalace_config
+
+    palace_path = _config.palace_path
+    synapse_db = SynapseDB(palace_path)
+    pm = ProfileManager(palace_path)
+    prof = pm.resolve("default", global_merged=global_merged_from_mempalace_config(cfg))
+    pd = prof.to_dict()
+
+    out: dict = {
+        "synapse_enabled": True,
+        "pinned_memories": [],
+        "pinned_count": 0,
+        "pinned_total_tokens": 0,
+        "consolidation_suggestions": [],
+        "supersede_suggestions": {"candidates": [], "checked": False},
+    }
+
+    if pd.get("pinned_memory_enabled", False):
+        pm_res = synapse_db.get_pinned_memories(
+            col,
+            max_tokens=int(pd.get("pinned_max_tokens", 2000)),
+            max_items=int(pd.get("pinned_max_items", 5)),
+            ltp_threshold=float(pd.get("pinned_ltp_threshold", 1.5)),
+            include_tagged=bool(pd.get("pinned_include_tagged", True)),
+            tagged_window_hours=int(pd.get("pinned_tagged_window_hours", 48)),
+        )
+        out["pinned_memories"] = pm_res.get("pinned_memories", [])
+        out["pinned_count"] = pm_res.get("pinned_count", 0)
+        out["pinned_total_tokens"] = pm_res.get("pinned_total_tokens", 0)
+
+    if pd.get("consolidation_suggestions_in_status", True):
+        out["consolidation_suggestions"] = synapse_db.get_consolidation_candidates(
+            inactive_days=cfg.synapse_consolidation_inactive_days
+        )
+
+    out["supersede_suggestions"] = synapse_db.detect_superseded_palace_wide(
+        col,
+        similarity_threshold=float(pd.get("supersede_similarity_threshold", 0.86)),
+        min_age_gap_days=int(pd.get("supersede_min_age_gap_days", 7)),
+        max_candidates=int(pd.get("supersede_max_candidates", 10)),
+    )
+    return out
+
+
+def tool_supersede_check(
+    similarity_threshold: float = 0.86,
+    min_age_gap_days: int = 7,
+    max_candidates: int = 10,
+    wing: Optional[str] = None,
+):
+    """Palace-wide supersede pair detection (optional wing filter)."""
+    cfg = MempalaceConfig()
+    if not cfg.synapse_enabled:
+        return {"candidates": [], "checked": False, "synapse_enabled": False}
+    col = _get_collection()
+    if not col:
+        return _no_palace()
+    db = SynapseDB(_config.palace_path)
+    return db.detect_superseded_palace_wide(
+        col,
+        similarity_threshold=similarity_threshold,
+        min_age_gap_days=min_age_gap_days,
+        max_candidates=max_candidates,
+        wing=wing,
+    )
+
+
+def tool_consolidate(
+    drawer_ids: List[str],
+    summary: str,
+    wing: Optional[str] = None,
+    room: Optional[str] = None,
+):
+    """Merge drawers into one consolidated summary drawer (caller supplies summary text)."""
+    if not summary or not str(summary).strip():
+        return {
+            "error": "summary is required. Synapse does not auto-summarize.",
+        }
+    if not drawer_ids:
+        return {"error": "drawer_ids must contain at least one ID."}
+    col = _get_collection(create=True)
+    if not col:
+        return _no_palace()
+    db = SynapseDB(_config.palace_path)
+    try:
+        return db.consolidate(col, drawer_ids, summary, wing=wing, room=room)
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 def tool_check_duplicate(content: str, threshold: float = 0.9):
@@ -950,6 +1059,67 @@ TOOLS = {
         "description": "Palace graph overview: total rooms, tunnel connections, edges between wings.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_graph_stats,
+    },
+    "mempalace_session_context": {
+        "description": (
+            "Returns pinned memories and maintenance suggestions for session startup. "
+            "Call at the beginning of each session."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+        "handler": tool_session_context,
+    },
+    "mempalace_supersede_check": {
+        "description": (
+            "Scan the palace for drawer pairs where a newer note likely supersedes an older one "
+            "(similar content + time gap). Optional wing filter."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "similarity_threshold": {
+                    "type": "number",
+                    "description": "Cosine similarity threshold (default 0.86)",
+                },
+                "min_age_gap_days": {
+                    "type": "integer",
+                    "description": "Minimum days between filed_at timestamps (default 7)",
+                },
+                "max_candidates": {
+                    "type": "integer",
+                    "description": "Max pairs to return (default 10)",
+                },
+                "wing": {
+                    "type": "string",
+                    "description": "If set, only drawers in this wing are considered",
+                },
+            },
+        },
+        "handler": tool_supersede_check,
+    },
+    "mempalace_consolidate": {
+        "description": (
+            "Consolidate multiple drawers into a single summary drawer. Source drawers are "
+            "soft-archived (reversible). The caller must provide the summary text — Synapse does "
+            "not generate summaries."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "drawer_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Drawer IDs to merge",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Verbatim summary text for the new consolidated drawer",
+                },
+                "wing": {"type": "string", "description": "Optional wing for the summary drawer"},
+                "room": {"type": "string", "description": "Optional room for the summary drawer"},
+            },
+            "required": ["drawer_ids", "summary"],
+        },
+        "handler": tool_consolidate,
     },
     "mempalace_search": {
         "description": "Semantic search. Returns verbatim drawer content with similarity scores.",

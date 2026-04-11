@@ -17,6 +17,54 @@ import chromadb
 logger = logging.getLogger("mempalace_mcp")
 
 
+def _embed_query_text(collection: Any, text: str) -> list[float]:
+    """Chroma collection の埋め込み関数でクエリベクトルを取得する。"""
+    ef = getattr(collection, "_embedding_function", None)
+    if ef is None:
+        return []
+    try:
+        vecs = ef([text])
+        if vecs and isinstance(vecs[0], (list, tuple)):
+            return [float(x) for x in vecs[0]]
+    except Exception as e:
+        logger.debug("query embedding failed: %s", e)
+    return []
+
+
+def _chroma_rows_to_hits(
+    docs: list,
+    metas: list,
+    dists: list,
+    ids: list,
+    from_expansion: bool,
+    embeddings_row: Optional[list] = None,
+) -> list[dict[str, Any]]:
+    hits = []
+    for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists)):
+        drawer_id = ids[i] if i < len(ids) else ""
+        meta = meta or {}
+        hit: dict[str, Any] = {
+            "id": drawer_id,
+            "metadata": meta,
+            "text": doc,
+            "wing": meta.get("wing", "unknown"),
+            "room": meta.get("room", "unknown"),
+            "source_file": Path(meta.get("source_file", "?")).name,
+            "similarity": round(1 - dist, 3),
+            "distance": dist,
+            "_from_expansion": from_expansion,
+        }
+        if embeddings_row is not None and i < len(embeddings_row):
+            emb = embeddings_row[i]
+            if emb is not None:
+                if hasattr(emb, "tolist"):
+                    emb = emb.tolist()
+                if isinstance(emb, list):
+                    hit["embedding"] = [float(x) for x in emb]
+        hits.append(hit)
+    return hits
+
+
 class SearchError(Exception):
     """Raised when search cannot proceed (e.g. no palace found)."""
 
@@ -150,11 +198,15 @@ def search_memories(
         else:
             where = excl
 
+    include_cols = ["documents", "metadatas", "distances"]
+    if cfg.synapse_enabled:
+        include_cols.append("embeddings")
+
     try:
         kwargs = {
             "query_texts": [query],
             "n_results": n_results,
-            "include": ["documents", "metadatas", "distances"],
+            "include": include_cols,
         }
         if where:
             kwargs["where"] = where
@@ -167,24 +219,13 @@ def search_memories(
     metas = results["metadatas"][0]
     dists = results["distances"][0]
     ids = results.get("ids", [[]])[0]
+    emb_row = results.get("embeddings", [[]])[0] if cfg.synapse_enabled else None
 
-    hits = []
-    for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists)):
-        drawer_id = ids[i] if i < len(ids) else ""
-        meta = meta or {}
-        hits.append(
-            {
-                "id": drawer_id,
-                "metadata": meta,
-                "text": doc,
-                "wing": meta.get("wing", "unknown"),
-                "room": meta.get("room", "unknown"),
-                "source_file": Path(meta.get("source_file", "?")).name,
-                "similarity": round(1 - dist, 3),
-            }
-        )
+    hits = _chroma_rows_to_hits(
+        docs, metas, dists, ids, from_expansion=False, embeddings_row=emb_row
+    )
 
-    result = {
+    result: dict[str, Any] = {
         "query": query,
         "filters": {"wing": wing, "room": room},
         "results": hits,
@@ -230,14 +271,92 @@ def search_memories(
                 per_query_overrides=per_query or None,
                 global_merged=global_merged_from_mempalace_config(cfg),
             )
+            pd = profile.to_dict()
 
-            # Profile observability — expose fallback to caller
             result["synapse_requested_profile"] = synapse_profile
             result["synapse_profile_used"] = profile.name
 
             synapse_db = SynapseDB(palace_path)
             query_hash = hashlib.sha256(query.encode()).hexdigest()[:16]
             session_id = uuid.uuid4().hex[:16]
+
+            query_embedding = _embed_query_text(col, query)
+
+            expansion_metadata: dict[str, Any] = {"applied": False}
+            expanded_terms: list[str] = []
+            if pd.get("query_expansion_enabled", False):
+                er = synapse_db.expand_query(
+                    col,
+                    query,
+                    query_embedding,
+                    max_expansions=int(pd.get("query_expansion_max_terms", 3)),
+                    similarity_threshold=float(
+                        pd.get("query_expansion_similarity_threshold", 0.65)
+                    ),
+                )
+                expanded_terms = er.get("expansion_terms") or []
+                boost = float(pd.get("query_expansion_boost", 0.7))
+                expansion_metadata = {
+                    "applied": True,
+                    "original_query": query,
+                    "similar_past_queries": er.get("similar_past_queries", []),
+                    "expansion_terms": expanded_terms,
+                    "expansion_boost": boost,
+                }
+            else:
+                boost = float(pd.get("query_expansion_boost", 0.7))
+
+            merged_by_id: dict[str, dict[str, Any]] = {}
+            original_ids: set[str] = set()
+            for h in hits:
+                hid = h.get("id", "")
+                merged_by_id[hid] = h
+                if hid:
+                    original_ids.add(hid)
+
+            if expanded_terms:
+                for term in expanded_terms:
+                    eq = f"{query} {term}"
+                    try:
+                        qkwargs = {
+                            "query_texts": [eq],
+                            "n_results": n_results,
+                            "include": include_cols,
+                        }
+                        if where:
+                            qkwargs["where"] = where
+                        exr = col.query(**qkwargs)
+                        edocs = exr["documents"][0]
+                        emetas = exr["metadatas"][0]
+                        edists = exr["distances"][0]
+                        eids = exr.get("ids", [[]])[0]
+                        eer = (
+                            exr.get("embeddings", [[]])[0]
+                            if cfg.synapse_enabled
+                            else None
+                        )
+                        exhits = _chroma_rows_to_hits(
+                            edocs,
+                            emetas,
+                            edists,
+                            eids,
+                            from_expansion=True,
+                            embeddings_row=eer,
+                        )
+                        for eh in exhits:
+                            eid = eh.get("id", "")
+                            if eid and eid not in merged_by_id:
+                                merged_by_id[eid] = eh
+                    except Exception as ex:
+                        logger.warning("expansion query failed: %s", ex)
+
+            result["hits"] = list(merged_by_id.values())
+            if expansion_metadata.get("applied"):
+                expansion_metadata["results_from_original"] = len(original_ids)
+                expansion_metadata["results_from_expansion"] = max(
+                    0, len(merged_by_id) - len(original_ids)
+                )
+            result["synapse_query_expansion"] = expansion_metadata
 
             hit_drawer_ids = []
             for hit in result["hits"]:
@@ -294,6 +413,8 @@ def search_memories(
                     )
 
                     final_score = similarity * decay * ltp * association * tagging
+                    if hit.get("_from_expansion"):
+                        final_score *= boost
 
                     hit["synapse_score"] = final_score
                     hit["synapse_factors"] = {
@@ -306,27 +427,159 @@ def search_memories(
                     hit["synapse_profile"] = profile.name
 
                 result["hits"].sort(
-                    key=lambda h: h.get(
-                        "synapse_score", h.get("similarity", 0.0)
-                    ),
+                    key=lambda h: h.get("synapse_score", h.get("similarity", 0.0)),
                     reverse=True,
                 )
+
+                # Same drawer: prefer original (non-expansion) — re-sort stable by
+                # stripping expansion penalty when duplicate ids (merged_by_id already deduped)
+
                 result["synapse_enabled"] = True
                 result["synapse_profile"] = profile.to_dict()
 
-                if cfg.synapse_log_retrievals and hit_drawer_ids:
-                    try:
-                        synapse_db.log_retrieval(
-                            hit_drawer_ids, query_hash, session_id, conn=conn
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "Synapse log_retrieval failed (non-fatal): %s", e
-                        )
+                hits_after_score = result["hits"]
+
+                # Phase 8 — Supersede
+                if pd.get("supersede_filter_enabled", False):
+                    sres = synapse_db.detect_superseded(
+                        col,
+                        [h.get("id") for h in hits_after_score if h.get("id")],
+                        similarity_threshold=float(
+                            pd.get("supersede_similarity_threshold", 0.86)
+                        ),
+                        min_age_gap_days=int(pd.get("supersede_min_age_gap_days", 7)),
+                        max_candidates=int(pd.get("supersede_max_candidates", 10)),
+                    )
+                    filt = synapse_db.apply_supersede_filter(
+                        hits_after_score,
+                        sres,
+                        action=str(pd.get("supersede_action", "filter")),
+                    )
+                    hits_after_score = filt["results"]
+                    result["synapse_supersede"] = filt["synapse_supersede"]
+                else:
+                    result["synapse_supersede"] = {"checked": False}
+
+                # Phase 9 — Consolidation resolve
+                consolidation_metadata: dict[str, Any] = {"applied": False}
+                if pd.get("include_consolidated_summaries", True):
+                    include_sources = pd.get("include_consolidated_sources", False)
+                    consolidated_removed: list[str] = []
+                    new_hits: list[dict[str, Any]] = []
+                    to_fetch_summary: list[str] = []
+                    for hit in hits_after_score:
+                        meta = hit.get("metadata") or {}
+                        if meta.get("status") == "consolidated":
+                            if include_sources:
+                                hit = dict(hit)
+                                into = meta.get("consolidated_into", "unknown")
+                                hit["synapse_consolidated_note"] = (
+                                    f"This drawer was consolidated into {into}"
+                                )
+                                new_hits.append(hit)
+                            else:
+                                consolidated_removed.append(hit.get("id", ""))
+                                into = meta.get("consolidated_into")
+                                if into:
+                                    to_fetch_summary.append(str(into))
+                        else:
+                            new_hits.append(hit)
+
+                    present = {h.get("id") for h in new_hits}
+                    for cid in dict.fromkeys(to_fetch_summary):
+                        if cid and cid not in present:
+                            try:
+                                got = col.get(
+                                    ids=[cid],
+                                    include=["documents", "metadatas", "embeddings"],
+                                )
+                                if got.get("ids"):
+                                    doc = (got.get("documents") or [""])[0]
+                                    meta = (got.get("metadatas") or [{}])[0] or {}
+                                    emb = (got.get("embeddings") or [None])[0]
+                                    dist = 0.5
+                                    nh = _chroma_rows_to_hits(
+                                        [doc],
+                                        [meta],
+                                        [dist],
+                                        [cid],
+                                        from_expansion=False,
+                                        embeddings_row=[emb] if emb else None,
+                                    )[0]
+                                    nh["similarity"] = 0.5
+                                    nh["synapse_score"] = 0.5
+                                    new_hits.append(nh)
+                                    present.add(cid)
+                            except Exception:
+                                pass
+
+                    hits_after_score = new_hits
+                    consolidation_metadata = {
+                        "applied": True,
+                        "consolidated_sources_hidden": len(consolidated_removed),
+                        "include_sources": include_sources,
+                    }
+                result["synapse_consolidation"] = consolidation_metadata
+
+                # Phase 5 — MMR
+                if pd.get("mmr_enabled", False):
+                    mmr_out = synapse_db.apply_mmr(
+                        hits_after_score,
+                        query_embedding,
+                        lambda_param=float(pd.get("mmr_lambda", 0.7)),
+                        final_k=int(pd.get("mmr_final_k", 5)),
+                    )
+                    hits_after_score = mmr_out["results"]
+                    result["synapse_mmr"] = mmr_out["mmr_metadata"]
+                else:
+                    result["synapse_mmr"] = {"applied": False}
+
+                for h in hits_after_score:
+                    h.pop("_from_expansion", None)
+
+                result["hits"] = hits_after_score
+                result["results"] = hits_after_score
+
+                if cfg.synapse_log_retrievals:
+                    log_ids = [
+                        hit.get("metadata", {}).get("drawer_id", hit.get("id", ""))
+                        for hit in hits_after_score
+                    ]
+                    log_ids = [x for x in log_ids if x]
+                    if log_ids:
+                        try:
+                            synapse_db.log_retrieval(
+                                log_ids, query_hash, session_id, conn=conn
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "Synapse log_retrieval failed (non-fatal): %s", e
+                            )
+
+            try:
+                synapse_db.log_query(
+                    query,
+                    query_embedding,
+                    [h.get("id", "") for h in result["hits"]],
+                    [
+                        float(h.get("synapse_score", h.get("similarity", 0.0)))
+                        for h in result["hits"]
+                    ],
+                )
+            except Exception:
+                pass
         else:
             result["synapse_enabled"] = False
+            result["synapse_query_expansion"] = {"applied": False}
+            result["synapse_supersede"] = {"checked": False}
+            result["synapse_consolidation"] = {"applied": False}
+            result["synapse_mmr"] = {"applied": False}
     except Exception as e:
         logger.warning("Synapse scoring skipped: %s", e)
         result["synapse_enabled"] = False
+        result["synapse_query_expansion"] = {"applied": False}
+        result["synapse_supersede"] = {"checked": False}
+        result["synapse_consolidation"] = {"applied": False}
+        result["synapse_mmr"] = {"applied": False}
 
     return result
