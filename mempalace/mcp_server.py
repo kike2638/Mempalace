@@ -102,13 +102,17 @@ _discovered_wings_cache = None
 def _folder_to_wing(folder_name: str) -> str:
     """Normalize a folder name into a valid wing name.
 
-    Handles collisions by preserving hyphens vs underscores:
+    Preserves Unicode characters (CJK, etc.), hyphens, and underscores.
     'My-Project' -> 'wing_my-project'
     'my_project' -> 'wing_my_project'
+    'プロジェクトA' -> 'wing_プロジェクトa'
     """
     slug = folder_name.lower()
-    slug = re.sub(r'[^a-z0-9_\-]+', '_', slug)
+    # Keep word characters (Unicode-aware), hyphens, digits
+    slug = re.sub(r'[^\w\-]+', '_', slug)
     slug = slug.strip('_')
+    if not slug:
+        slug = "unnamed"
     return f"wing_{slug}"
 
 
@@ -138,24 +142,9 @@ def _sync_wings_from_root(force=False):
         _discovered_wings_cache = []
         return []
 
-    col = _get_collection(create=True)
-    if not col:
-        _discovered_wings_cache = []
-        return []
-
-    # Gather existing wings from ChromaDB
-    existing_wings = set()
-    try:
-        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
-        for m in all_meta:
-            existing_wings.add(m.get("wing", ""))
-    except Exception:
-        pass
-
-    # Gather registered wings from wing_config.json
+    # Known wings from wing_config.json (single source of truth for registration)
     wing_config = _config.load_wing_config()
-    registered_wings = set(wing_config.get("wings", {}).keys())
-    known_wings = existing_wings | registered_wings
+    known_wings = set(wing_config.get("wings", {}).keys())
 
     # Scan subdirectories
     new_wings = []
@@ -201,10 +190,11 @@ def _sync_wings_from_root(force=False):
 # ==================== READ TOOLS ====================
 
 def tool_status():
+    # Return cached auto-discovered wings (no rescan, no I/O)
+    _sync_wings_from_root(force=False)
+
     col = _get_collection()
     if not col:
-
-
         return _no_palace()
     count = col.count()
     wings = {}
@@ -904,7 +894,6 @@ def main():
     logger.info("MemPalace MCP Server starting...")
     _sync_wings_from_root()
     while True:
-
         try:
             line = sys.stdin.readline()
             if not line:
