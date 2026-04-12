@@ -785,13 +785,20 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
     )
 
     try:
-        # TODO: Future versions should expand AAAK before embedding to improve
-        # semantic search quality. For now, store raw AAAK in metadata so it's
-        # preserved, and keep the document as-is for embedding (even though
-        # compressed AAAK degrades embedding quality).
+        # If entry is AAAK-compressed, expand it for better embedding quality
+        # while preserving the original compressed form in metadata.
+        from mempalace.dialect import Dialect
+
+        embed_text = entry
+        meta_extra = {}
+        if Dialect.looks_like_aaak(entry):
+            _expand_dialect = Dialect()
+            embed_text = _expand_dialect.expand(entry)
+            meta_extra["aaak_compressed"] = entry
+
         col.add(
             ids=[entry_id],
-            documents=[entry],
+            documents=[embed_text],
             metadatas=[
                 {
                     "wing": wing,
@@ -802,6 +809,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
                     "agent": agent_name,
                     "filed_at": now.isoformat(),
                     "date": now.strftime("%Y-%m-%d"),
+                    **meta_extra,
                 }
             ],
         )
