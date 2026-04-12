@@ -118,6 +118,8 @@ mempalace status
 
 Three mining modes: **projects** (code and docs), **convos** (conversation exports), and **general** (auto-classifies into decisions, preferences, milestones, problems, and emotional context). Everything stays on your machine.
 
+Behavior note: conversation imports now preserve the original transcript text by default. MemPalace no longer spell-corrects imported chat messages during `--mode convos`; the spellcheck helper remains available as a separate utility.
+
 ---
 
 ## How You Actually Use It
