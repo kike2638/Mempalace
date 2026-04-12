@@ -10,12 +10,14 @@ Stores verbatim chunks as drawers. No summaries. Ever.
 import os
 import sys
 import hashlib
+import json
 import fnmatch
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
 from .palace import SKIP_DIRS, get_collection, file_already_mined
+from .content_hash import BloomFilter, ContentHashDB
 
 READABLE_EXTENSIONS = {
     ".txt",
@@ -409,19 +411,28 @@ def process_file(
     wing: str,
     rooms: list,
     agent: str,
-    dry_run: bool,
-) -> tuple:
-    """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
+    dry_run: bool = False,
+    hash_db: ContentHashDB = None,
+) -> int:
+    """Read, chunk, route, and file one file. Returns drawer count."""
 
-    # Skip if already filed
+    # Skip if already filed (content hash check first)
+    if not dry_run and hash_db:
+        if hash_db.check_and_add(filepath):
+            return 0
+
     source_file = str(filepath)
-    if not dry_run and file_already_mined(collection, source_file, check_mtime=True):
-        return 0, None
+
+    # Fallback: check ChromaDB for safety (handles JSON deletion/corruption)
+    if not dry_run and file_already_mined(collection, source_file):
+        if hash_db:
+            hash_db.record(filepath)
+        return 0
 
     try:
         content = filepath.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return 0, None
+        return 0
 
     content = content.strip()
     if len(content) < MIN_CHUNK_SIZE:
@@ -578,8 +589,10 @@ def mine(
 
     if not dry_run:
         collection = get_collection(palace_path)
+        hash_db = ContentHashDB(os.path.join(palace_path, "content_hashes.db"))
     else:
         collection = None
+        hash_db = None
 
     total_drawers = 0
     files_skipped = 0
@@ -594,6 +607,7 @@ def mine(
             rooms=rooms,
             agent=agent,
             dry_run=dry_run,
+            hash_db=hash_db,
         )
         if drawers == 0 and not dry_run:
             files_skipped += 1
@@ -613,6 +627,10 @@ def mine(
         print(f"    {room:20} {count} files")
     print('\n  Next: mempalace search "what you\'re looking for"')
     print(f"{'=' * 55}\n")
+
+    if not dry_run and hash_db:
+        hash_db.flush()
+        hash_db.close()
 
 
 # =============================================================================

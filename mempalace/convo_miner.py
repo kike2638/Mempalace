@@ -17,6 +17,7 @@ from collections import defaultdict
 
 from .normalize import normalize
 from .palace import SKIP_DIRS, get_collection, file_already_mined
+from .content_hash import BloomFilter, ContentHashDB
 
 
 # File types that might contain conversations
@@ -265,6 +266,7 @@ def mine_convos(
     print(f"{'-' * 55}\n")
 
     collection = get_collection(palace_path) if not dry_run else None
+    hash_db = ContentHashDB(os.path.join(palace_path, "content_hashes.db")) if not dry_run else None
 
     total_drawers = 0
     files_skipped = 0
@@ -273,8 +275,16 @@ def mine_convos(
     for i, filepath in enumerate(files, 1):
         source_file = str(filepath)
 
-        # Skip if already filed
+        # Skip if already filed (content hash check first)
+        if not dry_run and hash_db:
+            if hash_db.check_and_add(filepath):
+                files_skipped += 1
+                continue
+
+        # Fallback: check ChromaDB for safety
         if not dry_run and file_already_mined(collection, source_file):
+            if hash_db:
+                hash_db.record(filepath)
             files_skipped += 1
             continue
 
@@ -369,6 +379,10 @@ def mine_convos(
             print(f"    {room:20} {count} files")
     print('\n  Next: mempalace search "what you\'re looking for"')
     print(f"{'=' * 55}\n")
+
+    if not dry_run and hash_db:
+        hash_db.flush()
+        hash_db.close()
 
 
 if __name__ == "__main__":
