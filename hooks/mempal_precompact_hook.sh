@@ -68,7 +68,7 @@ import json, sys
 try:
     cfg = json.load(open(sys.argv[1]))
     print(str(cfg.get('hooks', {}).get('auto_save', True)).lower())
-except: print('true')
+except Exception: print('true')
 " "$CONFIG_FILE" 2>/dev/null)
         if [ "$AUTO_SAVE" = "false" ]; then
             echo "{}"
@@ -95,6 +95,6 @@ fi
 cat << 'HOOKJSON'
 {
   "decision": "block",
-  "reason": "MemPalace emergency save — compaction imminent. Use mempalace_diary_write and mempalace_add_drawer to save ALL content before context is lost. Do NOT use native auto-memory files."
+  "reason": "MemPalace emergency save — compaction imminent. Use mempalace_diary_write (thorough summary) and mempalace_add_drawer (ALL quotes, decisions, code, context) to save ALL content before context is lost. Do NOT use native auto-memory files."
 }
 HOOKJSON

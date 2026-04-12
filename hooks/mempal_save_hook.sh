@@ -78,7 +78,7 @@ import json, sys
 try:
     cfg = json.load(open(sys.argv[1]))
     print(str(cfg.get('hooks', {}).get('auto_save', True)).lower())
-except: print('true')
+except Exception: print('true')
 " "$CONFIG_FILE" 2>/dev/null)
         if [ "$AUTO_SAVE" = "false" ]; then
             echo "{}"
@@ -171,7 +171,7 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
     cat << 'HOOKJSON'
 {
   "decision": "block",
-  "reason": "MemPalace auto-save checkpoint. Use mempalace_diary_write and mempalace_add_drawer to save session content. Do NOT use native auto-memory files."
+  "reason": "MemPalace auto-save checkpoint. Use mempalace_diary_write (session summary) and mempalace_add_drawer (quotes, decisions, code) to save session content. Do NOT use native auto-memory files."
 }
 HOOKJSON
 else
