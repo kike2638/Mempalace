@@ -204,6 +204,20 @@ def test_session_start_passes_through(tmp_path):
 # --- hook_precompact ---
 
 
+def test_precompact_sanitizes_session_id(tmp_path):
+    """Precompact hook must sanitize session_id the same way stop hook does."""
+    result = _capture_hook_output(
+        hook_precompact,
+        {"session_id": "../../etc/passwd"},
+        state_dir=tmp_path,
+    )
+    assert result["decision"] == "block"
+    # Verify the state dir has no path traversal artifacts
+    state_files = list(tmp_path.iterdir())
+    for f in state_files:
+        assert ".." not in f.name
+
+
 def test_precompact_always_blocks(tmp_path):
     result = _capture_hook_output(
         hook_precompact,
