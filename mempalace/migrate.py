@@ -33,13 +33,15 @@ def extract_drawers_from_sqlite(db_path: str) -> list:
     conn.row_factory = sqlite3.Row
 
     # Get all embedding IDs and their documents
-    rows = conn.execute("""
+    rows = conn.execute(
+        """
         SELECT e.embedding_id,
                MAX(CASE WHEN em.key = 'chroma:document' THEN em.string_value END) as document
         FROM embeddings e
         JOIN embedding_metadata em ON em.id = e.id
         GROUP BY e.embedding_id
-    """).fetchall()
+    """
+    ).fetchall()
 
     drawers = []
     for row in rows:
@@ -95,7 +97,9 @@ def detect_chromadb_version(db_path: str) -> str:
         # 0.6.x has embeddings_queue but no schema_str
         tables = [
             r[0]
-            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
         ]
         if "embeddings_queue" in tables:
             return "0.6.x"
@@ -126,6 +130,12 @@ def migrate(palace_path: str, dry_run: bool = False):
     source_version = detect_chromadb_version(db_path)
     print(f"  Source:    ChromaDB {source_version}")
     print(f"  Target:    ChromaDB {chromadb.__version__}")
+
+    # Capture expected schema from current ChromaDB version
+    from .schema import create_reference_schema, validate_and_patch
+
+    print("  Capturing reference schema...")
+    reference_schema = create_reference_schema()
 
     # Try reading with current chromadb first
     try:
@@ -197,6 +207,17 @@ def migrate(palace_path: str, dry_run: bool = False):
     final_count = col.count()
     del col
     del client
+
+    # Validate schema before swapping
+    temp_db = os.path.join(temp_palace, "chroma.sqlite3")
+    print("  Validating migrated schema...")
+    valid, actions = validate_and_patch(temp_db, reference=reference_schema)
+    for action in actions:
+        print(f"    {action}")
+    if not valid:
+        print("\n  ERROR: Schema validation failed. Aborting.")
+        print(f"  Temp palace preserved at: {temp_palace}")
+        return False
 
     # Swap: remove old palace, move new one into place
     print("  Swapping old palace for migrated version...")
