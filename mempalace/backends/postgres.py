@@ -13,6 +13,7 @@ logger = logging.getLogger("mempalace.postgres")
 EMBEDDING_DIM = 384
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 VECTOR_INDEX_MIN_ROWS = 5_000
+VECTOR_INDEX_CHECK_INTERVAL_ROWS = 1_000
 
 _embedder = None
 
@@ -70,6 +71,8 @@ class PostgresCollection(BaseCollection):
         self._table_am: Optional[str] = None
         self._index_am: Optional[str] = None
         self._setup_done = False
+        self._vector_index_ready = False
+        self._rows_since_index_check = VECTOR_INDEX_CHECK_INTERVAL_ROWS
 
     def add(
         self,
@@ -80,47 +83,14 @@ class PostgresCollection(BaseCollection):
         embeddings: Optional[list[list[float]]] = None,
     ) -> None:
         """Add documents with optional caller-provided embeddings."""
-        if len(documents) != len(ids):
-            raise ValueError("documents and ids must have the same length")
-        self._ensure_setup()
-        if embeddings is None:
-            embeddings = _embed(documents)
-        if len(embeddings) != len(documents):
-            raise ValueError("embeddings and documents must have the same length")
-
-        conn = self._get_conn()
-        cur = conn.cursor()
-        for index, (doc_id, document) in enumerate(zip(ids, documents)):
-            metadata = dict(metadatas[index]) if metadatas and index < len(metadatas) else {}
-            wing = _metadata_value(metadata.pop("wing", ""))
-            room = _metadata_value(metadata.pop("room", ""))
-            embedding = _vec_literal(embeddings[index])
-
-            if self._table_am == "sorted_heap":
-                cur.execute(
-                    self._sql.SQL("SELECT 1 FROM {} WHERE id = %s LIMIT 1").format(self._table_id),
-                    (doc_id,),
-                )
-                if cur.fetchone():
-                    continue
-                cur.execute(
-                    self._sql.SQL(
-                        "INSERT INTO {} (wing, room, id, document, embedding, metadata) "
-                        "VALUES (%s, %s, %s, %s, %s::{}, %s::jsonb)"
-                    ).format(self._table_id, self._vec_type_sql),
-                    (wing, room, doc_id, document, embedding, json.dumps(metadata)),
-                )
-            else:
-                cur.execute(
-                    self._sql.SQL(
-                        "INSERT INTO {} (id, wing, room, document, embedding, metadata) "
-                        "VALUES (%s, %s, %s, %s, %s::{}, %s::jsonb) "
-                        "ON CONFLICT (id) DO NOTHING"
-                    ).format(self._table_id, self._vec_type_sql),
-                    (doc_id, wing, room, document, embedding, json.dumps(metadata)),
-                )
-
-        self._maybe_create_vector_index()
+        embeddings = self._prepare_write_inputs(documents, ids, metadatas, embeddings)
+        self._insert_rows(
+            documents=documents,
+            ids=ids,
+            metadatas=metadatas,
+            embeddings=embeddings,
+            update_on_conflict=False,
+        )
 
     def upsert(
         self,
@@ -130,8 +100,108 @@ class PostgresCollection(BaseCollection):
         metadatas: Optional[list[dict[str, Any]]] = None,
         embeddings: Optional[list[list[float]]] = None,
     ) -> None:
-        self.delete(ids=ids)
-        self.add(documents=documents, ids=ids, metadatas=metadatas, embeddings=embeddings)
+        embeddings = self._prepare_write_inputs(documents, ids, metadatas, embeddings)
+        self._insert_rows(
+            documents=documents,
+            ids=ids,
+            metadatas=metadatas,
+            embeddings=embeddings,
+            update_on_conflict=True,
+        )
+
+    def _prepare_write_inputs(
+        self,
+        documents: list[str],
+        ids: list[str],
+        metadatas: Optional[list[dict[str, Any]]],
+        embeddings: Optional[list[list[float]]],
+    ) -> list[list[float]]:
+        if len(documents) != len(ids):
+            raise ValueError("documents and ids must have the same length")
+        if metadatas is not None and len(metadatas) != len(documents):
+            raise ValueError("metadatas and documents must have the same length")
+        self._ensure_setup()
+        if embeddings is None:
+            embeddings = _embed(documents)
+        if len(embeddings) != len(documents):
+            raise ValueError("embeddings and documents must have the same length")
+        return embeddings
+
+    def _insert_rows(
+        self,
+        *,
+        documents: list[str],
+        ids: list[str],
+        metadatas: Optional[list[dict[str, Any]]],
+        embeddings: list[list[float]],
+        update_on_conflict: bool,
+    ) -> None:
+        if update_on_conflict:
+            conflict_clause = self._sql.SQL(
+                "ON CONFLICT (id) DO UPDATE SET "
+                "wing = EXCLUDED.wing, "
+                "room = EXCLUDED.room, "
+                "document = EXCLUDED.document, "
+                "embedding = EXCLUDED.embedding, "
+                "metadata = EXCLUDED.metadata"
+            )
+        else:
+            conflict_clause = self._sql.SQL("ON CONFLICT (id) DO NOTHING")
+
+        rows_by_id = {}
+        rows = []
+        for index, (doc_id, document) in enumerate(zip(ids, documents)):
+            metadata = dict(metadatas[index]) if metadatas else {}
+            wing = _metadata_value(metadata.pop("wing", ""))
+            room = _metadata_value(metadata.pop("room", ""))
+            embedding = _vec_literal(embeddings[index])
+            row = (wing, room, doc_id, document, embedding, json.dumps(metadata))
+            if update_on_conflict:
+                rows_by_id[doc_id] = row
+            elif doc_id not in rows_by_id:
+                rows_by_id[doc_id] = row
+                rows.append(row)
+
+        if update_on_conflict:
+            rows = list(rows_by_id.values())
+        if not rows:
+            return
+
+        wings = [row[0] for row in rows]
+        rooms = [row[1] for row in rows]
+        doc_ids = [row[2] for row in rows]
+        row_documents = [row[3] for row in rows]
+        row_embeddings = [row[4] for row in rows]
+        row_metadatas = [row[5] for row in rows]
+
+        conn = self._get_conn()
+        cur = conn.cursor()
+        if self._table_am == "sorted_heap":
+            cur.execute(
+                self._sql.SQL(
+                    "INSERT INTO {} (wing, room, id, document, embedding, metadata) "
+                    "SELECT wing, room, id, document, embedding_text::{}, metadata_text::jsonb "
+                    "FROM unnest("
+                    "%s::text[], %s::text[], %s::text[], %s::text[], %s::text[], %s::text[]"
+                    ") AS rows(wing, room, id, document, embedding_text, metadata_text) "
+                    "{}"
+                ).format(self._table_id, self._vec_type_sql, conflict_clause),
+                (wings, rooms, doc_ids, row_documents, row_embeddings, row_metadatas),
+            )
+        else:
+            cur.execute(
+                self._sql.SQL(
+                    "INSERT INTO {} (id, wing, room, document, embedding, metadata) "
+                    "SELECT id, wing, room, document, embedding_text::{}, metadata_text::jsonb "
+                    "FROM unnest("
+                    "%s::text[], %s::text[], %s::text[], %s::text[], %s::text[], %s::text[]"
+                    ") AS rows(id, wing, room, document, embedding_text, metadata_text) "
+                    "{}"
+                ).format(self._table_id, self._vec_type_sql, conflict_clause),
+                (doc_ids, wings, rooms, row_documents, row_embeddings, row_metadatas),
+            )
+
+        self._maybe_create_vector_index(inserted_rows=len(rows))
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
         self._ensure_setup()
@@ -403,11 +473,19 @@ class PostgresCollection(BaseCollection):
             self._vec_type,
         )
 
-    def _maybe_create_vector_index(self) -> None:
+    def _maybe_create_vector_index(self, *, inserted_rows: int = 0) -> None:
+        if self._vector_index_ready:
+            return
+        self._rows_since_index_check += inserted_rows
+        if self._rows_since_index_check < VECTOR_INDEX_CHECK_INTERVAL_ROWS:
+            return
+        self._rows_since_index_check = 0
+
         cur = self._get_conn().cursor()
         index_name = f"{self.table_name}_vec_idx"
         cur.execute("SELECT 1 FROM pg_indexes WHERE indexname = %s", (index_name,))
         if cur.fetchone():
+            self._vector_index_ready = True
             return
 
         if self.count() < VECTOR_INDEX_MIN_ROWS:
@@ -422,37 +500,73 @@ class PostgresCollection(BaseCollection):
                 self._sql.SQL(ops),
             )
         )
+        self._vector_index_ready = True
 
     def _where_to_sql(self, where: Optional[dict[str, Any]]):
         if not where:
             return None, []
+        if not isinstance(where, dict):
+            raise ValueError("PostgreSQL where filter must be a dictionary")
 
-        if "$and" in where:
+        if len(where) == 1 and next(iter(where)) in ("$and", "$or"):
+            operator = next(iter(where))
+            conditions = where[operator]
+            if not isinstance(conditions, list) or not conditions:
+                raise ValueError(f"PostgreSQL where operator {operator} requires a non-empty list")
             parts = []
             params = []
-            for condition in where["$and"]:
+            for condition in conditions:
                 clause, clause_params = self._where_to_sql(condition)
-                if clause:
-                    parts.append(self._sql.SQL("({})").format(clause))
-                    params.extend(clause_params)
+                if clause is None:
+                    raise ValueError(f"PostgreSQL where operator {operator} contains an empty filter")
+                parts.append(self._sql.SQL("({})").format(clause))
+                params.extend(clause_params)
             if not parts:
                 return None, []
-            return self._sql.SQL(" AND ").join(parts), params
+            joiner = self._sql.SQL(" AND " if operator == "$and" else " OR ")
+            return joiner.join(parts), params
 
         clauses = []
         params = []
         for key, value in where.items():
             if key.startswith("$"):
-                continue
-            if key in ("wing", "room"):
-                clauses.append(self._sql.SQL("{} = %s").format(self._sql.Identifier(key)))
-                params.append(_metadata_value(value))
-            else:
-                clauses.append(self._sql.SQL("metadata->>%s = %s"))
-                params.extend([key, _metadata_value(value)])
+                raise ValueError(f"Unsupported PostgreSQL where operator: {key}")
+            clause, clause_params = self._field_filter_to_sql(key, value)
+            clauses.append(clause)
+            params.extend(clause_params)
         if not clauses:
             return None, []
         return self._sql.SQL(" AND ").join(clauses), params
+
+    def _field_filter_to_sql(self, key: str, value: Any):
+        if key in ("wing", "room"):
+            lhs = self._sql.SQL("{}").format(self._sql.Identifier(key))
+            lhs_params = []
+        else:
+            lhs = self._sql.SQL("metadata->>%s")
+            lhs_params = [key]
+
+        if not isinstance(value, dict):
+            return self._sql.SQL("{} = %s").format(lhs), [*lhs_params, _metadata_value(value)]
+
+        if len(value) != 1:
+            raise ValueError(f"PostgreSQL where field {key!r} must contain exactly one operator")
+
+        operator, operand = next(iter(value.items()))
+        if operator == "$eq":
+            return self._sql.SQL("{} = %s").format(lhs), [*lhs_params, _metadata_value(operand)]
+        if operator == "$ne":
+            return self._sql.SQL("{} <> %s").format(lhs), [*lhs_params, _metadata_value(operand)]
+        if operator in ("$in", "$nin"):
+            if not isinstance(operand, list) or not operand:
+                raise ValueError(f"PostgreSQL where operator {operator} requires a non-empty list")
+            placeholders = self._sql.SQL(", ").join(self._sql.Placeholder() for _ in operand)
+            sql_operator = self._sql.SQL("IN" if operator == "$in" else "NOT IN")
+            return (
+                self._sql.SQL("{} {} ({})").format(lhs, sql_operator, placeholders),
+                [*lhs_params, *(_metadata_value(item) for item in operand)],
+            )
+        raise ValueError(f"Unsupported PostgreSQL where field operator: {operator}")
 
     @staticmethod
     def _metadata_dict(wing: str, room: str, metadata: Any) -> dict[str, Any]:
