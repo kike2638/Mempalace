@@ -185,6 +185,23 @@ def test_postgres_where_rejects_unsupported_filters():
         collection._where_to_sql({"source_mtime": {"$gt": 1}})
 
 
+def test_postgres_get_and_delete_reject_empty_ids(monkeypatch):
+    collection = PostgresCollection("postgresql://example")
+    monkeypatch.setattr(PostgresCollection, "_ensure_setup", lambda self: None)
+
+    with pytest.raises(ValueError, match="non-empty list in get"):
+        collection.get(ids=[])
+
+    with pytest.raises(ValueError, match="non-empty list in get"):
+        collection.get(ids=[], where={"wing": "work"})
+
+    with pytest.raises(ValueError, match="non-empty list in delete"):
+        collection.delete(ids=[])
+
+    with pytest.raises(ValueError, match="non-empty list in delete"):
+        collection.delete(ids=[], where={"wing": "work"})
+
+
 def test_postgres_upsert_embeds_before_opening_write_cursor(monkeypatch):
     calls = []
     collection = PostgresCollection("postgresql://example")

@@ -265,7 +265,9 @@ class PostgresCollection(BaseCollection):
 
         clauses = []
         params: list[Any] = []
-        if ids:
+        if ids is not None:
+            if not ids:
+                raise ValueError("Expected ids to be a non-empty list in get")
             placeholders = self._sql.SQL(", ").join(self._sql.Placeholder() for _ in ids)
             clauses.append(self._sql.SQL("id IN ({})").format(placeholders))
             params.extend(ids)
@@ -307,6 +309,8 @@ class PostgresCollection(BaseCollection):
         self._ensure_setup()
         ids = kwargs.get("ids")
         where = kwargs.get("where")
+        if ids is not None and not ids:
+            raise ValueError("Expected ids to be a non-empty list in delete")
         if not ids and not where:
             return
 
