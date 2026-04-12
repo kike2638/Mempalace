@@ -339,10 +339,14 @@ class PostgresCollection(BaseCollection):
     def count(self) -> int:
         self._ensure_setup()
         cur = self._get_conn().cursor()
-        # Public collection API: keep this exact. Use _estimated_count() only for
-        # internal heuristics where stale PostgreSQL catalog stats are acceptable.
+        # Public collection API: keep this exact. Use estimated_count() for
+        # status/heuristic paths where stale PostgreSQL catalog stats are acceptable.
         cur.execute(self._sql.SQL("SELECT COUNT(*) FROM {}").format(self._table_id))
         return cur.fetchone()[0]
+
+    def estimated_count(self) -> int:
+        self._ensure_setup()
+        return self._estimated_count()
 
     @property
     def _sql(self):

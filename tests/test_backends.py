@@ -317,6 +317,29 @@ def test_postgres_estimated_count_uses_catalog_stats_and_local_floor(monkeypatch
     assert events == ["cursor", ("execute", (collection.table_name,))]
 
 
+def test_postgres_public_estimated_count_uses_catalog_stats(monkeypatch):
+    events = []
+
+    class FakeCursor:
+        def execute(self, query, params=None):
+            events.append(("execute", params))
+
+        def fetchone(self):
+            return (42,)
+
+    class FakeConnection:
+        def cursor(self):
+            events.append("cursor")
+            return FakeCursor()
+
+    collection = PostgresCollection("postgresql://example")
+    monkeypatch.setattr(collection, "_ensure_setup", lambda: None)
+    monkeypatch.setattr(PostgresCollection, "_get_conn", lambda self: FakeConnection())
+
+    assert collection.estimated_count() == 42
+    assert events == ["cursor", ("execute", (collection.table_name,))]
+
+
 def test_palace_defaults_to_chroma_backend(monkeypatch):
     class FakeBackend:
         def __init__(self):

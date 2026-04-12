@@ -655,3 +655,28 @@ def test_memory_stack_status_with_palace(tmp_path):
 
     assert result["total_drawers"] == 42
     assert result["L0_identity"]["exists"] is True
+
+
+def test_memory_stack_status_prefers_backend_estimated_count(tmp_path):
+    identity_file = tmp_path / "identity.txt"
+    identity_file.write_text("I am Atlas.")
+
+    class FakeCollection:
+        def count(self):
+            raise AssertionError("exact count should not be called")
+
+        def estimated_count(self):
+            return 123
+
+    with (
+        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
+        patch("mempalace.layers._get_collection", return_value=FakeCollection()),
+    ):
+        mock_cfg.return_value.palace_path = "/fake"
+        stack = MemoryStack(
+            palace_path="/fake",
+            identity_path=str(identity_file),
+        )
+        result = stack.status()
+
+    assert result["total_drawers"] == 123
