@@ -7,6 +7,8 @@ Thanks for wanting to help. MemPalace is open source and we welcome contribution
 ```bash
 git clone https://github.com/MemPalace/mempalace.git
 cd mempalace
+git remote add upstream https://github.com/milla-jovovich/mempalace.git
+
 pip install -e ".[dev]"    # installs with dev dependencies (pytest, build, twine)
 ```
 

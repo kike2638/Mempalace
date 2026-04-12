@@ -184,7 +184,13 @@ def _try_codex_jsonl(content: str) -> Optional[str]:
 
 
 def _try_claude_ai_json(data) -> Optional[str]:
-    """Claude.ai JSON export: flat messages list or privacy export with chat_messages."""
+    """Claude.ai JSON export: flat messages list or privacy export with chat_messages.
+
+    Claude.ai exports use "sender" (human/assistant) while the generic Claude
+    API format uses "role" (user/assistant).  We accept both.  The "text" field
+    is preferred over "content" because privacy exports always populate it,
+    whereas "content" may be a list of typed blocks.
+    """
     if isinstance(data, dict):
         data = data.get("messages", data.get("chat_messages", []))
     if not isinstance(data, list):
@@ -192,31 +198,42 @@ def _try_claude_ai_json(data) -> Optional[str]:
 
     # Privacy export: array of conversation objects with chat_messages inside each
     if data and isinstance(data[0], dict) and "chat_messages" in data[0]:
-        all_messages = []
+        transcripts = []
         for convo in data:
             if not isinstance(convo, dict):
                 continue
             chat_msgs = convo.get("chat_messages", [])
+            messages = []
             for item in chat_msgs:
                 if not isinstance(item, dict):
                     continue
-                role = item.get("role", "")
-                text = _extract_content(item.get("content", ""))
+                role = item.get("sender") or item.get("role") or ""
+                text = (item.get("text") or "").strip() or _extract_content(
+                    item.get("content", "")
+                )
                 if role in ("user", "human") and text:
-                    all_messages.append(("user", text))
+                    messages.append(("user", text))
                 elif role in ("assistant", "ai") and text:
-                    all_messages.append(("assistant", text))
-        if len(all_messages) >= 2:
-            return _messages_to_transcript(all_messages)
-        return None
+                    messages.append(("assistant", text))
+            if len(messages) >= 2:
+                header = (convo.get("name") or "").strip()
+                t = _messages_to_transcript(messages)
+                if header:
+                    t = f"--- {header} ---\n\n{t}"
+                transcripts.append(t)
+        if transcripts:
+            return "\n\n".join(transcripts)
+        return ""  # Format identified as Claude.ai but all convos empty — don't fall through to Slack parser
 
     # Flat messages list
     messages = []
     for item in data:
         if not isinstance(item, dict):
             continue
-        role = item.get("role", "")
-        text = _extract_content(item.get("content", ""))
+        role = item.get("sender") or item.get("role") or ""
+        text = (item.get("text") or "").strip() or _extract_content(
+            item.get("content", "")
+        )
         if role in ("user", "human") and text:
             messages.append(("user", text))
         elif role in ("assistant", "ai") and text:
