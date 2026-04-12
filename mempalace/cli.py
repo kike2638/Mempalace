@@ -36,6 +36,14 @@ from pathlib import Path
 from .config import MempalaceConfig
 
 
+def _resolve_path(p: str) -> str:
+    """Resolve a path, handling symlinks (e.g. macOS /var → /private/var)."""
+    try:
+        return str(Path(p).resolve())
+    except OSError:
+        return p
+
+
 def cmd_init(args):
     import json
     from pathlib import Path
@@ -71,6 +79,10 @@ def cmd_mine(args):
     for raw in args.include_ignored or []:
         include_ignored.extend(part.strip() for part in raw.split(",") if part.strip())
 
+    # --force: delete existing drawers for this directory before re-mining
+    if getattr(args, "force", False) and not args.dry_run:
+        _force_clean(palace_path, args.dir)
+
     if args.mode == "convos":
         from .convo_miner import mine_convos
 
@@ -96,6 +108,44 @@ def cmd_mine(args):
             respect_gitignore=not args.no_gitignore,
             include_ignored=include_ignored,
         )
+
+
+def _force_clean(palace_path: str, source_dir: str):
+    """Delete all drawers from files under source_dir — used by --force re-mine."""
+    import chromadb
+    from pathlib import Path
+
+    try:
+        client = chromadb.PersistentClient(path=palace_path)
+        col = client.get_collection("mempalace_drawers")
+    except Exception:
+        return  # No palace yet — nothing to clean
+
+    source_prefix = str(Path(source_dir).expanduser().resolve())
+    batch_size = 500
+    offset = 0
+    to_delete = []
+
+    while True:
+        batch = col.get(limit=batch_size, offset=offset, include=["metadatas"])
+        if not batch["ids"]:
+            break
+        for drawer_id, meta in zip(batch["ids"], batch["metadatas"]):
+            sf = meta.get("source_file", "")
+            # Resolve symlinks for consistent comparison (macOS /var → /private/var)
+            try:
+                sf_resolved = str(Path(sf).resolve()) if sf else ""
+            except OSError:
+                sf_resolved = sf
+            if sf_resolved.startswith(source_prefix):
+                to_delete.append(drawer_id)
+        offset += len(batch["ids"])
+
+    if to_delete:
+        print(f"\n  --force: deleting {len(to_delete)} existing drawers from {source_prefix}...")
+        for i in range(0, len(to_delete), 100):
+            col.delete(ids=to_delete[i : i + 100])
+        print("  Deleted. Re-mining fresh.\n")
 
 
 def cmd_search(args):
@@ -167,7 +217,14 @@ def cmd_status(args):
 
 
 def cmd_repair(args):
-    """Rebuild palace vector index from SQLite metadata."""
+    """Rebuild palace vector index by migrating to a fresh collection.
+
+    The previous approach (delete_collection + create_collection on the same
+    path) can segfault when the HNSW index is corrupted — the delete operation
+    itself touches the broken segment. This version reads all data via get()
+    (which bypasses HNSW), writes to a brand-new palace at a temporary path,
+    then swaps directories. The original palace is preserved as a backup.
+    """
     import chromadb
     import shutil
 
@@ -182,7 +239,8 @@ def cmd_repair(args):
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
 
-    # Try to read existing drawers
+    # Read existing drawers via get() — this bypasses the HNSW index
+    # entirely, so it works even when the vector index is corrupted.
     try:
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_collection("mempalace_drawers")
@@ -197,59 +255,281 @@ def cmd_repair(args):
         print("  Nothing to repair.")
         return
 
-    # Extract all drawers in batches
+    # Extract all drawers in small batches (large batches can OOM on big palaces)
     print("\n  Extracting drawers...")
-    batch_size = 5000
+    read_batch = 500
     all_ids = []
     all_docs = []
     all_metas = []
     offset = 0
     while offset < total:
-        batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
+        batch = col.get(limit=read_batch, offset=offset, include=["documents", "metadatas"])
+        if not batch["ids"]:
+            break
         all_ids.extend(batch["ids"])
         all_docs.extend(batch["documents"])
         all_metas.extend(batch["metadatas"])
-        offset += batch_size
+        offset += len(batch["ids"])
+        if offset % 5000 == 0 or offset >= total:
+            print(f"  Read {offset}/{total}")
     print(f"  Extracted {len(all_ids)} drawers")
 
-    # Backup and rebuild
+    # Release the old client before creating the new palace.
+    del col
+    del client
+
     palace_path = palace_path.rstrip(os.sep)
+    rebuild_path = palace_path + "_rebuild"
+    if os.path.exists(rebuild_path):
+        shutil.rmtree(rebuild_path)
+
+    print("\n  Rebuilding into fresh palace...")
+    new_client = chromadb.PersistentClient(path=rebuild_path)
+    new_col = new_client.create_collection("mempalace_drawers")
+
+    write_batch = 100
+    filed = 0
+    try:
+        for i in range(0, len(all_ids), write_batch):
+            end = min(i + write_batch, len(all_ids))
+            new_col.add(
+                documents=all_docs[i:end],
+                ids=all_ids[i:end],
+                metadatas=all_metas[i:end],
+            )
+            filed += end - i
+            if filed % 2000 == 0 or filed >= len(all_ids):
+                print(f"  Written {filed}/{len(all_ids)}")
+    except Exception as e:
+        print(f"\n  ERROR during rebuild at {filed}/{len(all_ids)}: {e}")
+        print(f"  Partial rebuild at {rebuild_path} — original palace untouched.")
+        sys.exit(1)
+
+    rebuilt_count = new_col.count()
+    if rebuilt_count != len(all_ids):
+        print(f"\n  WARNING: rebuilt {rebuilt_count} but expected {len(all_ids)}")
+        print(f"  Rebuild kept at {rebuild_path} — original untouched.")
+        return
+
+    del new_col
+    del new_client
+
+    # Swap: original -> backup, rebuild -> palace
     backup_path = palace_path + ".backup"
     if os.path.exists(backup_path):
         shutil.rmtree(backup_path)
-    print(f"  Backing up to {backup_path}...")
-    shutil.copytree(palace_path, backup_path)
-
-    print("  Rebuilding collection...")
-    client.delete_collection("mempalace_drawers")
-    new_col = client.create_collection("mempalace_drawers")
-
-    filed = 0
-    for i in range(0, len(all_ids), batch_size):
-        batch_ids = all_ids[i : i + batch_size]
-        batch_docs = all_docs[i : i + batch_size]
-        batch_metas = all_metas[i : i + batch_size]
-        new_col.add(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
-        filed += len(batch_ids)
-        print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
+    print(f"\n  Backing up original to {backup_path}")
+    os.rename(palace_path, backup_path)
+    os.rename(rebuild_path, palace_path)
 
     print(f"\n  Repair complete. {filed} drawers rebuilt.")
     print(f"  Backup saved at {backup_path}")
+    print(f"  (Delete backup with: rm -rf '{backup_path}')")
     print(f"\n{'=' * 55}\n")
 
 
-def cmd_hook(args):
-    """Run hook logic: reads JSON from stdin, outputs JSON to stdout."""
-    from .hooks_cli import run_hook
+def cmd_sync(args):  # noqa: C901
+    """Sync palace with source files — re-mine changed files, report stale drawers."""
+    import chromadb
+    from pathlib import Path
 
-    run_hook(hook_name=args.hook, harness=args.harness)
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
 
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Sync")
+    print(f"{'=' * 55}\n")
 
-def cmd_instructions(args):
-    """Output skill instructions to stdout."""
-    from .instructions_cli import run_instructions
+    try:
+        client = chromadb.PersistentClient(path=palace_path)
+        col = client.get_collection("mempalace_drawers")
+    except Exception:
+        print(f"  No palace found at {palace_path}")
+        print("  Run: mempalace init <dir> then mempalace mine <dir>")
+        sys.exit(1)
 
-    run_instructions(name=args.name)
+    total = col.count()
+    if total == 0:
+        print("  Palace is empty. Nothing to sync.")
+        return
+
+    # Collect all unique source files and their content hashes from the palace
+    print(f"  Scanning {total} drawers for source files...")
+    source_files = {}  # source_file -> {hash, drawer_ids, wing}
+    batch_size = 500
+    offset = 0
+    while offset < total:
+        batch = col.get(limit=batch_size, offset=offset, include=["metadatas"])
+        if not batch["ids"]:
+            break
+        for drawer_id, meta in zip(batch["ids"], batch["metadatas"]):
+            sf = meta.get("source_file", "")
+            if not sf:
+                continue
+            if sf not in source_files:
+                source_files[sf] = {
+                    "hash": meta.get("content_hash", ""),
+                    "drawer_ids": [],
+                    "wing": meta.get("wing", ""),
+                    "ingest_mode": meta.get("ingest_mode", ""),
+                }
+            source_files[sf]["drawer_ids"].append(drawer_id)
+        offset += len(batch["ids"])
+
+    print(f"  Found {len(source_files)} unique source files\n")
+
+    # Filter by directory if specified
+    if args.dir:
+        sync_dir = str(Path(args.dir).expanduser().resolve())
+        source_files = {
+            sf: info for sf, info in source_files.items() if _resolve_path(sf).startswith(sync_dir)
+        }
+        print(f"  Filtered to {len(source_files)} files in {sync_dir}\n")
+
+    if not source_files:
+        print("  No source files to check.")
+        return
+
+    # Check each source file for changes
+    stale = []  # files that changed
+    missing = []  # files that no longer exist
+    fresh = 0  # files unchanged
+    no_hash = 0  # files without content_hash (mined before sync feature)
+
+    for sf, info in sorted(source_files.items()):
+        if not os.path.exists(sf):
+            missing.append(sf)
+            continue
+
+        stored_hash = info["hash"]
+        if not stored_hash:
+            no_hash += 1
+            continue
+
+        try:
+            from .miner import file_content_hash
+
+            current_hash = file_content_hash(Path(sf))
+        except OSError:
+            missing.append(sf)
+            continue
+
+        if current_hash != stored_hash:
+            stale.append(sf)
+        else:
+            fresh += 1
+
+    # Report
+    print(f"  Fresh (unchanged):     {fresh}")
+    print(f"  Stale (changed):       {len(stale)}")
+    print(f"  Missing (deleted):     {len(missing)}")
+    if no_hash:
+        print(f"  No hash (legacy):      {no_hash} (re-mine with --force to add hashes)")
+    print()
+
+    if stale:
+        print("  Changed files:")
+        for sf in stale[:20]:
+            n = len(source_files[sf]["drawer_ids"])
+            print(f"    {Path(sf).name} ({n} drawers)")
+        if len(stale) > 20:
+            print(f"    ... and {len(stale) - 20} more")
+        print()
+
+    if missing:
+        print("  Missing files:")
+        for sf in missing[:10]:
+            n = len(source_files[sf]["drawer_ids"])
+            print(f"    {Path(sf).name} ({n} drawers)")
+        if len(missing) > 10:
+            print(f"    ... and {len(missing) - 10} more")
+        print()
+
+    if not stale and not missing:
+        print("  Everything is up to date!")
+        print(f"\n{'=' * 55}\n")
+        return
+
+    # Dry run — stop here
+    if args.dry_run:
+        total_stale = sum(len(source_files[sf]["drawer_ids"]) for sf in stale)
+        total_missing = sum(len(source_files[sf]["drawer_ids"]) for sf in missing)
+        print(f"  [DRY RUN] Would delete {total_stale} stale + {total_missing} orphaned drawers")
+        print(f"  [DRY RUN] Would re-mine {len(stale)} changed files")
+        print(f"\n{'=' * 55}\n")
+        return
+
+    # Atomic per-file: delete stale drawers then re-mine immediately
+    deleted = 0
+    re_mined = 0
+
+    if stale:
+        from .miner import process_file, file_content_hash
+        from .convo_miner import mine_convos
+
+        print(f"  Re-syncing {len(stale)} changed files...")
+        for sf in stale:
+            info = source_files[sf]
+            ids = info["drawer_ids"]
+            wing = info["wing"]
+            ingest_mode = info.get("ingest_mode", "")
+
+            # Step 1: delete stale drawers for this file
+            for i in range(0, len(ids), 100):
+                col.delete(ids=ids[i : i + 100])
+            deleted += len(ids)
+
+            # Step 2: re-mine this specific file immediately
+            filepath = Path(sf)
+            try:
+                if ingest_mode == "convos":
+                    mine_convos(
+                        convo_dir=str(filepath.parent),
+                        palace_path=palace_path,
+                        wing=wing,
+                        agent="mempalace",
+                        filepath_filter=str(filepath),
+                    )
+                    re_mined += 1
+                    print(f"    {filepath.name}: re-mined (convos)")
+                else:
+                    rooms = [{"name": "general", "keywords": []}]
+                    n = process_file(
+                        filepath=filepath,
+                        project_path=filepath.parent,
+                        collection=col,
+                        wing=wing,
+                        rooms=rooms,
+                        agent="mempalace",
+                        dry_run=False,
+                    )
+                    if n > 0:
+                        re_mined += 1
+                        print(f"    {filepath.name}: {n} drawers re-mined")
+                    else:
+                        print(f"    {filepath.name}: skipped (empty or too small)")
+            except Exception as e:
+                print(f"    {filepath.name}: ERROR — {e}")
+
+    # Delete drawers for missing files (if --clean flag)
+    if missing and args.clean:
+        print("  Cleaning orphaned drawers...")
+        orphan_count = 0
+        for sf in missing:
+            ids = source_files[sf]["drawer_ids"]
+            for i in range(0, len(ids), 100):
+                col.delete(ids=ids[i : i + 100])
+            orphan_count += len(ids)
+        deleted += orphan_count
+        print(f"  Cleaned {orphan_count} orphaned drawers")
+    elif missing:
+        print(f"  Skipped {len(missing)} missing files (use --clean to remove orphaned drawers)")
+
+    print("\n  Sync complete.")
+    print(f"  Deleted: {deleted} stale drawers")
+    if re_mined:
+        print(f"  Re-mined: {re_mined} files")
+    sep = "=" * 55
+    print(f"\n{sep}\n")
 
 
 def cmd_mcp(args):
@@ -271,6 +551,20 @@ def cmd_mcp(args):
         print("\nOptional custom palace:")
         print(f"  claude mcp add mempalace -- {base_server_cmd} --palace /path/to/palace")
         print(f"  {base_server_cmd} --palace /path/to/palace")
+
+
+def cmd_hook(args):
+    """Run hook logic: reads JSON from stdin, outputs JSON to stdout."""
+    from .hooks_cli import run_hook
+
+    run_hook(hook_name=args.hook, harness=args.harness)
+
+
+def cmd_instructions(args):
+    """Output skill instructions to stdout."""
+    from .instructions_cli import run_instructions
+
+    run_instructions(name=args.name)
 
 
 def cmd_compress(args):
@@ -447,6 +741,11 @@ def main():
         "--dry-run", action="store_true", help="Show what would be filed without filing"
     )
     p_mine.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-mine files even if already filed (deletes old drawers first)",
+    )
+    p_mine.add_argument(
         "--extract",
         choices=["exchange", "general"],
         default="exchange",
@@ -499,6 +798,27 @@ def main():
         help="Only split files containing at least N sessions (default: 2)",
     )
 
+    # sync
+    p_sync = sub.add_parser(
+        "sync",
+        help="Detect changed source files and re-mine stale drawers",
+    )
+    p_sync.add_argument(
+        "--dir",
+        default=None,
+        help="Only sync files under this directory (default: all source files)",
+    )
+    p_sync.add_argument(
+        "--clean",
+        action="store_true",
+        help="Also delete drawers for source files that no longer exist",
+    )
+    p_sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without modifying the palace",
+    )
+
     # hook
     p_hook = sub.add_parser(
         "hook",
@@ -509,14 +829,12 @@ def main():
     p_hook_run.add_argument(
         "--hook",
         required=True,
-        choices=["session-start", "stop", "precompact"],
-        help="Hook name to run",
+        help="Hook name to run (e.g. stop, precompact)",
     )
     p_hook_run.add_argument(
         "--harness",
-        required=True,
-        choices=["claude-code", "codex"],
-        help="Harness type (determines stdin JSON format)",
+        default="claude-code",
+        help="AI harness calling the hook (default: claude-code)",
     )
 
     # instructions
@@ -525,7 +843,7 @@ def main():
         help="Output skill instructions to stdout",
     )
     instructions_sub = p_instructions.add_subparsers(dest="instructions_name")
-    for instr_name in ["init", "search", "mine", "help", "status"]:
+    for instr_name in ["init", "search", "mine", "help", "status", "sync"]:
         instructions_sub.add_parser(instr_name, help=f"Output {instr_name} instructions")
 
     # repair
@@ -560,7 +878,6 @@ def main():
         parser.print_help()
         return
 
-    # Handle two-level subcommands
     if args.command == "hook":
         if not getattr(args, "hook_action", None):
             p_hook.print_help()
@@ -580,6 +897,7 @@ def main():
     dispatch = {
         "init": cmd_init,
         "mine": cmd_mine,
+        "sync": cmd_sync,
         "split": cmd_split,
         "search": cmd_search,
         "mcp": cmd_mcp,

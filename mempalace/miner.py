@@ -13,9 +13,18 @@ import hashlib
 import fnmatch
 from pathlib import Path
 from datetime import datetime
+
+
 from collections import defaultdict
 
 from .palace import SKIP_DIRS, get_collection, file_already_mined
+
+
+def file_content_hash(filepath: Path) -> str:
+    """Compute content hash for a file — single source of truth for sync."""
+    content = filepath.read_text(encoding="utf-8", errors="replace").strip()
+    return hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
+
 
 READABLE_EXTENSIONS = {
     ".txt",
@@ -369,31 +378,39 @@ def chunk_text(content: str, source_file: str) -> list:
 
 
 def add_drawer(
-    collection, wing: str, room: str, content: str, source_file: str, chunk_index: int, agent: str
+    collection,
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str,
+    chunk_index: int,
+    agent: str,
+    content_hash: str = "",  # computed from content if empty
 ):
     """Add one drawer to the palace."""
     drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(chunk_index)).encode()).hexdigest()[:24]}"
+    meta = {
+        "wing": wing,
+        "room": room,
+        "source_file": source_file,
+        "chunk_index": chunk_index,
+        "added_by": agent,
+        "filed_at": datetime.now().isoformat(),
+    }
+    if not content_hash:
+        content_hash = hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
+    if content_hash:
+        meta["content_hash"] = content_hash
     try:
-        metadata = {
-            "wing": wing,
-            "room": room,
-            "source_file": source_file,
-            "chunk_index": chunk_index,
-            "added_by": agent,
-            "filed_at": datetime.now().isoformat(),
-        }
-        # Store file mtime so we can detect modifications later.
-        try:
-            metadata["source_mtime"] = os.path.getmtime(source_file)
-        except OSError:
-            pass
-        collection.upsert(
+        collection.add(
             documents=[content],
             ids=[drawer_id],
-            metadatas=[metadata],
+            metadatas=[meta],
         )
         return True
-    except Exception:
+    except Exception as e:
+        if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+            return False
         raise
 
 
@@ -410,8 +427,8 @@ def process_file(
     rooms: list,
     agent: str,
     dry_run: bool,
-) -> tuple:
-    """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
+) -> int:
+    """Read, chunk, route, and file one file. Returns drawer count."""
 
     # Skip if already filed
     source_file = str(filepath)
@@ -429,10 +446,11 @@ def process_file(
 
     room = detect_room(filepath, content, rooms, project_path)
     chunks = chunk_text(content, source_file)
+    file_hash = file_content_hash(filepath)
 
     if dry_run:
         print(f"    [DRY RUN] {filepath.name} → room:{room} ({len(chunks)} drawers)")
-        return len(chunks), room
+        return len(chunks)
 
     # Purge stale drawers for this file before re-inserting the fresh chunks.
     # Converts modified-file re-mines from upsert-over-existing-IDs (which hits
@@ -454,11 +472,12 @@ def process_file(
             source_file=source_file,
             chunk_index=chunk["chunk_index"],
             agent=agent,
+            content_hash=file_hash,
         )
         if added:
             drawers_added += 1
 
-    return drawers_added, room
+    return drawers_added
 
 
 # =============================================================================
@@ -586,7 +605,7 @@ def mine(
     room_counts = defaultdict(int)
 
     for i, filepath in enumerate(files, 1):
-        drawers, room = process_file(
+        drawers = process_file(
             filepath=filepath,
             project_path=project_path,
             collection=collection,
@@ -599,6 +618,7 @@ def mine(
             files_skipped += 1
         else:
             total_drawers += drawers
+            room = detect_room(filepath, "", rooms, project_path)
             room_counts[room] += 1
             if not dry_run:
                 print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers}")
