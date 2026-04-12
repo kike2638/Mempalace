@@ -3,6 +3,8 @@
 import json
 import os
 
+import pytest
+
 from mempalace.config import MempalaceConfig
 
 
@@ -77,3 +79,30 @@ def test_collection_name_from_config(tmp_path):
     )
     cfg = MempalaceConfig(config_dir=str(tmp_path))
     assert cfg.collection_name == "custom_col"
+
+
+def test_backend_defaults_to_chroma(tmp_path):
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.backend == "chroma"
+
+
+def test_backend_accepts_postgres_alias_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMPALACE_BACKEND", "postgresql")
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.backend == "postgres"
+
+
+def test_backend_rejects_unknown_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMPALACE_BACKEND", "sqlite")
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    with pytest.raises(ValueError, match="Unsupported MemPalace backend"):
+        cfg.backend
+
+
+def test_postgres_dsn_prefers_env(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text(
+        json.dumps({"postgres_dsn": "config-dsn"}), encoding="utf-8"
+    )
+    monkeypatch.setenv("MEMPALACE_POSTGRES_DSN", "env-dsn")
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.postgres_dsn == "env-dsn"

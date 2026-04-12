@@ -60,6 +60,7 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
 
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
+DEFAULT_BACKEND = "chroma"
 
 DEFAULT_TOPIC_WINGS = [
     "emotions",
@@ -149,8 +150,41 @@ class MempalaceConfig:
 
     @property
     def collection_name(self):
-        """ChromaDB collection name."""
+        """Storage collection name."""
+        env_val = os.environ.get("MEMPALACE_COLLECTION_NAME")
+        if env_val:
+            return env_val
         return self._file_config.get("collection_name", DEFAULT_COLLECTION_NAME)
+
+    @property
+    def backend(self):
+        """Storage backend name.
+
+        Chroma remains the default. PostgreSQL must be explicitly enabled with
+        MEMPALACE_BACKEND=postgres or config.json {"backend": "postgres"}.
+        """
+        raw = os.environ.get("MEMPALACE_BACKEND") or self._file_config.get(
+            "backend", DEFAULT_BACKEND
+        )
+        backend = str(raw).strip().lower()
+        aliases = {
+            "chromadb": "chroma",
+            "chroma": "chroma",
+            "pg": "postgres",
+            "postgres": "postgres",
+            "postgresql": "postgres",
+        }
+        if backend not in aliases:
+            raise ValueError(f"Unsupported MemPalace backend: {raw}")
+        return aliases[backend]
+
+    @property
+    def postgres_dsn(self):
+        """PostgreSQL DSN for the optional postgres backend."""
+        env_val = os.environ.get("MEMPALACE_POSTGRES_DSN") or os.environ.get("MEMPALACE_PG_DSN")
+        if env_val:
+            return env_val
+        return self._file_config.get("postgres_dsn") or self._file_config.get("pg_dsn")
 
     @property
     def people_map(self):
@@ -206,6 +240,7 @@ class MempalaceConfig:
             default_config = {
                 "palace_path": DEFAULT_PALACE_PATH,
                 "collection_name": DEFAULT_COLLECTION_NAME,
+                "backend": DEFAULT_BACKEND,
                 "topic_wings": DEFAULT_TOPIC_WINGS,
                 "hall_keywords": DEFAULT_HALL_KEYWORDS,
             }

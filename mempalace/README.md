@@ -9,9 +9,10 @@ The Python package that powers MemPalace. All modules, all logic.
 | `cli.py` | CLI entry point — routes to mine, search, init, compress, wake-up |
 | `config.py` | Configuration loading — `~/.mempalace/config.json`, env vars, defaults |
 | `normalize.py` | Converts 5 chat formats (Claude Code JSONL, Claude.ai JSON, ChatGPT JSON, Slack JSON, plain text) to standard transcript format |
-| `miner.py` | Project file ingest — scans directories, chunks by paragraph, stores to ChromaDB |
+| `miner.py` | Project file ingest — scans directories, chunks by paragraph, stores to the configured palace backend |
 | `convo_miner.py` | Conversation ingest — chunks by exchange pair (Q+A), detects rooms from content |
-| `searcher.py` | Semantic search via ChromaDB vectors — filters by wing/room, returns verbatim + scores |
+| `searcher.py` | Semantic search via the palace backend — filters by wing/room, returns verbatim + scores |
+| `backends/` | Storage adapters — ChromaDB by default, optional PostgreSQL backend |
 | `layers.py` | 4-layer memory stack: L0 (identity), L1 (critical facts), L2 (room recall), L3 (deep search) |
 | `dialect.py` | AAAK compression — entity codes, emotion markers, 30x lossless ratio |
 | `knowledge_graph.py` | Temporal entity-relationship graph — SQLite, time-filtered queries, fact invalidation |
@@ -28,7 +29,7 @@ The Python package that powers MemPalace. All modules, all logic.
 ## Architecture
 
 ```
-User → CLI → miner/convo_miner → ChromaDB (palace)
+User → CLI → miner/convo_miner → palace backend
                                      ↕
                               knowledge_graph (SQLite)
                                      ↕
@@ -37,4 +38,4 @@ User → MCP Server → searcher → results
                   → diary    → agent journal
 ```
 
-The palace (ChromaDB) stores verbatim content. The knowledge graph (SQLite) stores structured relationships. The MCP server exposes both to any AI tool.
+The palace backend stores verbatim content. ChromaDB remains the default; PostgreSQL is optional for larger or long-lived deployments. The knowledge graph (SQLite) stores structured relationships. The MCP server exposes both to any AI tool.

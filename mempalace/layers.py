@@ -417,7 +417,8 @@ class MemoryStack:
         # Count drawers
         try:
             col = _get_collection(self.palace_path, create=False)
-            count = col.count()
+            estimate_count = getattr(type(col), "estimated_count", None)
+            count = estimate_count(col) if estimate_count is not None else col.count()
             result["total_drawers"] = count
         except Exception:
             result["total_drawers"] = 0

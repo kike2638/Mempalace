@@ -29,7 +29,7 @@ from pathlib import Path
 
 from .config import MempalaceConfig, sanitize_name, sanitize_content
 from .version import __version__
-import chromadb
+from .palace import get_collection as _get_collection_from_palace
 from .query_sanitizer import sanitize_query
 from .searcher import search_memories
 from .palace_graph import traverse, find_tunnels, graph_stats
@@ -69,6 +69,7 @@ else:
 
 _client_cache = None
 _collection_cache = None
+_collection_cache_key = None
 _palace_db_inode = 0  # inode of chroma.sqlite3 at cache time
 
 
@@ -120,41 +121,37 @@ def _wal_log(operation: str, params: dict, result: dict = None):
         logger.error(f"WAL write failed: {e}")
 
 
-def _get_client():
-    """Return a ChromaDB PersistentClient, reconnecting if the database changed on disk.
-
-    Detects palace rebuilds (repair/nuke/purge) by checking the inode of
-    chroma.sqlite3.  A full rebuild replaces the file, changing the inode.
-    """
-    global _client_cache, _collection_cache, _palace_db_inode, _metadata_cache, _metadata_cache_time
-    db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
+def _chroma_db_inode():
+    """Return the Chroma SQLite inode so rebuilds invalidate cached wrappers."""
+    if _config.backend != "chroma":
+        return None
     try:
-        current_inode = os.stat(db_path).st_ino
+        return os.stat(os.path.join(_config.palace_path, "chroma.sqlite3")).st_ino
     except OSError:
-        current_inode = 0
+        return 0
 
-    if _client_cache is None or current_inode != _palace_db_inode:
-        _client_cache = chromadb.PersistentClient(path=_config.palace_path)
-        _collection_cache = None
-        _metadata_cache = None
-        _metadata_cache_time = 0
-        _palace_db_inode = current_inode
-    return _client_cache
+
+def _get_collection_cache_key():
+    backend = _config.backend
+    backend_target = _config.postgres_dsn if backend == "postgres" else _config.palace_path
+    inode = _chroma_db_inode()
+    return (backend, backend_target, _config.collection_name, inode)
 
 
 def _get_collection(create=False):
-    """Return the ChromaDB collection, caching the client between calls."""
-    global _collection_cache, _metadata_cache, _metadata_cache_time
+    """Return the configured backend collection, caching the wrapper between calls."""
+    global _collection_cache, _collection_cache_key, _palace_db_inode
+    global _metadata_cache, _metadata_cache_time
     try:
-        client = _get_client()
-        if create:
-            _collection_cache = client.get_or_create_collection(
-                _config.collection_name, metadata={"hnsw:space": "cosine"}
+        cache_key = _get_collection_cache_key()
+        if create or _collection_cache is None or cache_key != _collection_cache_key:
+            _collection_cache = _get_collection_from_palace(
+                _config.palace_path,
+                collection_name=_config.collection_name,
+                create=create,
             )
-            _metadata_cache = None
-            _metadata_cache_time = 0
-        elif _collection_cache is None:
-            _collection_cache = client.get_collection(_config.collection_name)
+            _collection_cache_key = cache_key
+            _palace_db_inode = cache_key[3] or 0
             _metadata_cache = None
             _metadata_cache_time = 0
         return _collection_cache
@@ -174,10 +171,9 @@ def _no_palace():
 
 def _fetch_all_metadata(col, where=None):
     """Paginate col.get() to avoid the 10K silent truncation limit."""
-    total = col.count()
     all_meta = []
     offset = 0
-    while offset < total:
+    while True:
         kwargs = {"include": ["metadatas"], "limit": 1000, "offset": offset}
         if where:
             kwargs["where"] = where
@@ -219,11 +215,10 @@ def tool_status():
     col = _get_collection()
     if not col:
         return _no_palace()
-    count = col.count()
     wings = {}
     rooms = {}
     result = {
-        "total_drawers": count,
+        "total_drawers": 0,
         "wings": wings,
         "rooms": rooms,
         "palace_path": _config.palace_path,
@@ -237,6 +232,7 @@ def tool_status():
             r = m.get("room", "unknown")
             wings[w] = wings.get(w, 0) + 1
             rooms[r] = rooms.get(r, 0) + 1
+        result["total_drawers"] = len(all_meta)
     except Exception as e:
         logger.exception("tool_status metadata fetch failed")
         result["error"] = str(e)
@@ -646,11 +642,7 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
             },
         )
 
-        update_kwargs = {"ids": [drawer_id]}
-        if content is not None:
-            update_kwargs["documents"] = [new_doc]
-        update_kwargs["metadatas"] = [new_meta]
-        col.update(**update_kwargs)
+        col.upsert(ids=[drawer_id], documents=[new_doc], metadatas=[new_meta])
 
         _metadata_cache = None
 

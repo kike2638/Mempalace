@@ -42,3 +42,7 @@ class BaseCollection(ABC):
     @abstractmethod
     def count(self) -> int:
         raise NotImplementedError
+
+    def estimated_count(self) -> int:
+        """Return an approximate row count when a backend can do so cheaply."""
+        return self.count()
