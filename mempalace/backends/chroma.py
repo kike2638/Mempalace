@@ -67,11 +67,18 @@ class ChromaCollection(BaseCollection):
     def count(self):
         return self._collection.count()
 
+    @property
+    def metadata(self):
+        return self._collection.metadata
+
+    def modify(self, **kwargs):
+        self._collection.modify(**kwargs)
+
 
 class ChromaBackend:
     """Factory for MemPalace's default ChromaDB backend."""
 
-    def get_collection(self, palace_path: str, collection_name: str, create: bool = False):
+    def get_collection(self, palace_path: str, collection_name: str, create: bool = False, embedding_function=None, metadata=None):
         if not create and not os.path.isdir(palace_path):
             raise FileNotFoundError(palace_path)
 
@@ -84,8 +91,11 @@ class ChromaBackend:
 
         _fix_blob_seq_ids(palace_path)
         client = chromadb.PersistentClient(path=palace_path)
+        kwargs = {"embedding_function": embedding_function}
+        if metadata is not None:
+            kwargs["metadata"] = metadata
         if create:
-            collection = client.get_or_create_collection(collection_name)
+            collection = client.get_or_create_collection(collection_name, **kwargs)
         else:
-            collection = client.get_collection(collection_name)
+            collection = client.get_collection(collection_name, embedding_function=embedding_function)
         return ChromaCollection(collection)

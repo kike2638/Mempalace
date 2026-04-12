@@ -27,7 +27,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .config import MempalaceConfig, sanitize_name, sanitize_content
+from .config import (
+    EmbeddingModelMismatchError,
+    MempalaceConfig,
+    sanitize_name,
+    sanitize_content,
+)
 from .version import __version__
 import chromadb
 from .query_sanitizer import sanitize_query
@@ -158,6 +163,8 @@ def _get_collection(create=False):
             _metadata_cache = None
             _metadata_cache_time = 0
         return _collection_cache
+    except EmbeddingModelMismatchError:
+        raise
     except Exception:
         return None
 
@@ -1326,7 +1333,6 @@ def handle_request(request):
     elif method == "ping":
         return {"jsonrpc": "2.0", "id": req_id, "result": {}}
     elif method.startswith("notifications/"):
-        # Notifications (no id) never get a response per JSON-RPC spec
         return None
     elif method == "tools/list":
         return {
@@ -1376,6 +1382,17 @@ def handle_request(request):
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
+            }
+        except EmbeddingModelMismatchError as e:
+            logger.error(f"Embedding model mismatch in {tool_name}: {e}")
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {"type": "text", "text": json.dumps({"error": str(e)}, indent=2)}
+                    ]
+                },
             }
         except Exception:
             logger.exception(f"Tool error in {tool_name}")
