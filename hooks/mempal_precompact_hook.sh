@@ -54,6 +54,29 @@ mkdir -p "$STATE_DIR"
 # Leave empty to skip auto-ingest (AI handles saving via the block reason).
 MEMPAL_DIR=""
 
+# ── Silent mode / opt-out ──────────────────────────────────────────────
+# Set MEMPALACE_HOOKS_AUTO_SAVE=false to disable auto-save blocking entirely.
+if [ -n "$MEMPALACE_HOOKS_AUTO_SAVE" ]; then
+    case "$MEMPALACE_HOOKS_AUTO_SAVE" in
+        false|0|no) echo "{}"; exit 0 ;;
+    esac
+else
+    CONFIG_FILE="$HOME/.mempalace/config.json"
+    if [ -f "$CONFIG_FILE" ]; then
+        AUTO_SAVE=$(python3 -c "
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+    print(str(cfg.get('hooks', {}).get('auto_save', True)).lower())
+except: print('true')
+" "$CONFIG_FILE" 2>/dev/null)
+        if [ "$AUTO_SAVE" = "false" ]; then
+            echo "{}"
+            exit 0
+        fi
+    fi
+fi
+
 # Read JSON input from stdin
 INPUT=$(cat)
 
@@ -68,10 +91,10 @@ if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
     python3 -m mempalace mine "$MEMPAL_DIR" >> "$STATE_DIR/hook.log" 2>&1
 fi
 
-# Always block — compaction = save everything
+# Block — compaction = save everything
 cat << 'HOOKJSON'
 {
   "decision": "block",
-  "reason": "COMPACTION IMMINENT (MemPalace). Save ALL session content before context is lost:\n1. mempalace_diary_write — thorough AAAK-compressed session summary\n2. mempalace_add_drawer — ALL verbatim quotes, decisions, code, context\n3. mempalace_kg_add — entity relationships (optional)\nBe thorough — after compaction, detailed context will be lost. Do NOT write to Claude Code's native auto-memory (.md files). Save everything to MemPalace, then allow compaction to proceed."
+  "reason": "MemPalace emergency save — compaction imminent. Use mempalace_diary_write and mempalace_add_drawer to save ALL content before context is lost. Do NOT use native auto-memory files."
 }
 HOOKJSON

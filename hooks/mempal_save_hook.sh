@@ -61,6 +61,32 @@ mkdir -p "$STATE_DIR"
 # Leave empty to skip auto-ingest (AI handles saving via the block reason).
 MEMPAL_DIR=""
 
+# ── Silent mode / opt-out ──────────────────────────────────────────────
+# Set MEMPALACE_HOOKS_AUTO_SAVE=false to disable auto-save blocking entirely.
+# The hook stays installed but passes through without interrupting the session.
+# Can also be set in ~/.mempalace/config.json: {"hooks": {"auto_save": false}}
+if [ -n "$MEMPALACE_HOOKS_AUTO_SAVE" ]; then
+    case "$MEMPALACE_HOOKS_AUTO_SAVE" in
+        false|0|no) echo "{}"; exit 0 ;;
+    esac
+else
+    # Check config.json if env var is not set
+    CONFIG_FILE="$HOME/.mempalace/config.json"
+    if [ -f "$CONFIG_FILE" ]; then
+        AUTO_SAVE=$(python3 -c "
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+    print(str(cfg.get('hooks', {}).get('auto_save', True)).lower())
+except: print('true')
+" "$CONFIG_FILE" 2>/dev/null)
+        if [ "$AUTO_SAVE" = "false" ]; then
+            echo "{}"
+            exit 0
+        fi
+    fi
+fi
+
 # Read JSON input from stdin
 INPUT=$(cat)
 
@@ -145,7 +171,7 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
     cat << 'HOOKJSON'
 {
   "decision": "block",
-  "reason": "AUTO-SAVE checkpoint (MemPalace). Save this session's key content:\n1. mempalace_diary_write — AAAK-compressed session summary\n2. mempalace_add_drawer — verbatim quotes, decisions, code snippets\n3. mempalace_kg_add — entity relationships (optional)\nDo NOT write to Claude Code's native auto-memory (.md files). Continue conversation after saving."
+  "reason": "MemPalace auto-save checkpoint. Use mempalace_diary_write and mempalace_add_drawer to save session content. Do NOT use native auto-memory files."
 }
 HOOKJSON
 else

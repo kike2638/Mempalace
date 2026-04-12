@@ -14,26 +14,21 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from mempalace.config import MempalaceConfig
+
 SAVE_INTERVAL = 15
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
 STOP_BLOCK_REASON = (
-    "AUTO-SAVE checkpoint (MemPalace). Save this session's key content:\n"
-    "1. mempalace_diary_write — AAAK-compressed session summary\n"
-    "2. mempalace_add_drawer — verbatim quotes, decisions, code snippets\n"
-    "3. mempalace_kg_add — entity relationships (optional)\n"
-    "Do NOT write to Claude Code's native auto-memory (.md files). "
-    "Continue conversation after saving."
+    "MemPalace auto-save checkpoint. "
+    "Use mempalace_diary_write and mempalace_add_drawer to save session content. "
+    "Do NOT use native auto-memory files."
 )
 
 PRECOMPACT_BLOCK_REASON = (
-    "COMPACTION IMMINENT (MemPalace). Save ALL session content before context is lost:\n"
-    "1. mempalace_diary_write — thorough AAAK-compressed session summary\n"
-    "2. mempalace_add_drawer — ALL verbatim quotes, decisions, code, context\n"
-    "3. mempalace_kg_add — entity relationships (optional)\n"
-    "Be thorough \u2014 after compaction, detailed context will be lost. "
-    "Do NOT write to Claude Code's native auto-memory (.md files). "
-    "Save everything to MemPalace, then allow compaction to proceed."
+    "MemPalace emergency save — compaction imminent. "
+    "Use mempalace_diary_write and mempalace_add_drawer to save ALL content "
+    "before context is lost. Do NOT use native auto-memory files."
 )
 
 
@@ -62,7 +57,8 @@ def _count_human_messages(transcript_path: str) -> int:
                                 continue
                         elif isinstance(content, list):
                             text = " ".join(
-                                b.get("text", "") for b in content if isinstance(b, dict)
+                                b.get("text", "")
+                                for b in content if isinstance(b, dict)
                             )
                             if "<command-message>" in text:
                                 continue
@@ -71,9 +67,15 @@ def _count_human_messages(transcript_path: str) -> int:
                     # {"type": "event_msg", "payload": {"type": "user_message", "message": "..."}}
                     elif entry.get("type") == "event_msg":
                         payload = entry.get("payload", {})
-                        if isinstance(payload, dict) and payload.get("type") == "user_message":
+                        if (
+                            isinstance(payload, dict)
+                            and payload.get("type") == "user_message"
+                        ):
                             msg_text = payload.get("message", "")
-                            if isinstance(msg_text, str) and "<command-message>" not in msg_text:
+                            if (
+                                isinstance(msg_text, str)
+                                and "<command-message>" not in msg_text
+                            ):
                                 count += 1
                 except (json.JSONDecodeError, AttributeError):
                     pass
@@ -137,6 +139,11 @@ def hook_stop(data: dict, harness: str):
     stop_hook_active = parsed["stop_hook_active"]
     transcript_path = parsed["transcript_path"]
 
+    # Respect auto_save config toggle (clean opt-out)
+    if not MempalaceConfig().hooks_auto_save:
+        _output({})
+        return
+
     # If already in a save cycle, let through (infinite-loop prevention)
     if str(stop_hook_active).lower() in ("true", "1", "yes"):
         _output({})
@@ -157,7 +164,9 @@ def hook_stop(data: dict, harness: str):
 
     since_last = exchange_count - last_save
 
-    _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save")
+    _log(
+        f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save"
+    )
 
     if since_last >= SAVE_INTERVAL and exchange_count > 0:
         # Update last save point
@@ -191,9 +200,14 @@ def hook_session_start(data: dict, harness: str):
 
 
 def hook_precompact(data: dict, harness: str):
-    """Precompact hook: always block with comprehensive save instruction."""
+    """Precompact hook: block with save instruction unless auto-save is disabled."""
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
+
+    # Respect auto_save config toggle (clean opt-out)
+    if not MempalaceConfig().hooks_auto_save:
+        _output({})
+        return
 
     _log(f"PRE-COMPACT triggered for session {session_id}")
 
