@@ -73,6 +73,7 @@ class PostgresCollection(BaseCollection):
         self._setup_done = False
         self._vector_index_ready = False
         self._rows_since_index_check = VECTOR_INDEX_CHECK_INTERVAL_ROWS
+        self._local_row_estimate = 0
 
     def add(
         self,
@@ -166,6 +167,7 @@ class PostgresCollection(BaseCollection):
             rows = list(rows_by_id.values())
         if not rows:
             return
+        self._local_row_estimate += len(rows)
 
         wings = [row[0] for row in rows]
         rooms = [row[1] for row in rows]
@@ -488,7 +490,7 @@ class PostgresCollection(BaseCollection):
             self._vector_index_ready = True
             return
 
-        if self.count() < VECTOR_INDEX_MIN_ROWS:
+        if self._estimated_count() < VECTOR_INDEX_MIN_ROWS:
             return
 
         ops = "svec_cosine_ops" if self._vec_type == "svec" else "vector_cosine_ops"
@@ -501,6 +503,26 @@ class PostgresCollection(BaseCollection):
             )
         )
         self._vector_index_ready = True
+
+    def _estimated_count(self) -> int:
+        cur = self._get_conn().cursor()
+        cur.execute(
+            """
+            SELECT GREATEST(
+                COALESCE(c.reltuples, 0),
+                COALESCE(s.n_live_tup, 0)
+            )::bigint
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
+            WHERE n.nspname = 'public' AND c.relname = %s
+            """,
+            (self.table_name,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return self._local_row_estimate
+        return max(int(row[0]), self._local_row_estimate)
 
     def _where_to_sql(self, where: Optional[dict[str, Any]]):
         if not where:

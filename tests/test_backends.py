@@ -277,6 +277,29 @@ def test_postgres_vector_index_check_is_throttled(monkeypatch):
     assert collection._vector_index_ready is True
 
 
+def test_postgres_estimated_count_uses_catalog_stats_and_local_floor(monkeypatch):
+    events = []
+
+    class FakeCursor:
+        def execute(self, query, params=None):
+            events.append(("execute", params))
+
+        def fetchone(self):
+            return (42,)
+
+    class FakeConnection:
+        def cursor(self):
+            events.append("cursor")
+            return FakeCursor()
+
+    collection = PostgresCollection("postgresql://example")
+    collection._local_row_estimate = 100
+    monkeypatch.setattr(PostgresCollection, "_get_conn", lambda self: FakeConnection())
+
+    assert collection._estimated_count() == 100
+    assert events == ["cursor", ("execute", (collection.table_name,))]
+
+
 def test_palace_defaults_to_chroma_backend(monkeypatch):
     class FakeBackend:
         def __init__(self):
