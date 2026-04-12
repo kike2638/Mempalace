@@ -10,7 +10,9 @@ The backend supports two database extension paths:
 - `pgvector` (fallback): uses a regular heap table, `vector`, and `hnsw`.
 
 When both extensions are available in the target database, MemPalace prefers
-`pg_sorted_heap`.
+`pg_sorted_heap`. Both paths require a PostgreSQL extension to be available to
+the server and created in the target database. MemPalace does not vendor or
+install database extensions at Python package install time.
 
 ## Install MemPalace Dependencies
 
@@ -75,15 +77,49 @@ appropriate privilege escalation for your environment.
 
 ## Fallback: Install `pgvector`
 
-If `pg_sorted_heap` is not installed but `pgvector` is available, MemPalace will
-fall back to `pgvector` automatically.
+If `pg_sorted_heap` is not installed but the `vector` extension is available in
+the target database, MemPalace will fall back to `pgvector` automatically.
+`pgvector` is still a PostgreSQL extension, so it must be installed or exposed by
+your PostgreSQL distribution/provider and created in the database.
 
-Example:
+Check whether the server exposes the extension:
+
+```sql
+SELECT name, default_version, installed_version
+FROM pg_available_extensions
+WHERE name = 'vector';
+```
+
+Create the extension in the target database:
 
 ```bash
 psql "postgresql://mempalace_user@localhost:5432/mempalace" \
   -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
+
+The helper can also install `pgvector` from source for self-managed PostgreSQL:
+
+```bash
+scripts/install_pg_backend.sh \
+  --extension vector \
+  --dsn "postgresql://mempalace_user@localhost:5432/mempalace"
+```
+
+Manual source installation:
+
+```bash
+git clone https://github.com/pgvector/pgvector.git
+cd pgvector
+make
+make install
+psql "postgresql://mempalace_user@localhost:5432/mempalace" \
+  -c "CREATE EXTENSION IF NOT EXISTS vector;"
+```
+
+For managed PostgreSQL services, including AWS RDS/Aurora PostgreSQL versions
+that expose `vector` as a supported extension, do not run local `make install`
+against the managed server. Use the provider-supported extension mechanism and
+verify availability with `pg_available_extensions`.
 
 Use `pg_sorted_heap` when you can, because it gives MemPalace the intended
 sorted storage plus planner-integrated `sorted_hnsw` path. Use `pgvector` when

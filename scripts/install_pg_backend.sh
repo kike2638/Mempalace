@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="https://github.com/skuznetsov/pg_sorted_heap.git"
-BUILD_DIR="${TMPDIR:-/tmp}/mempalace-pg-sorted-heap"
+EXTENSION_NAME="pg_sorted_heap"
+REPO_URL=""
+BUILD_DIR=""
 PG_CONFIG_BIN="${PG_CONFIG:-}"
 PSQL_BIN="${PSQL:-}"
 DSN="${MEMPALACE_POSTGRES_DSN:-}"
@@ -13,21 +14,22 @@ CREATE_EXTENSION=1
 
 usage() {
   cat <<'EOF'
-Install pg_sorted_heap for the MemPalace PostgreSQL backend.
+Install a PostgreSQL extension for the MemPalace PostgreSQL backend.
 
 Usage:
   scripts/install_pg_backend.sh [options]
 
 Options:
+  --extension NAME      Extension to install: pg_sorted_heap or vector. Default: pg_sorted_heap.
   --dsn DSN             PostgreSQL DSN where CREATE EXTENSION should run.
   --pg-config PATH      pg_config for the PostgreSQL version to target.
   --psql PATH           psql binary to use for CREATE EXTENSION.
-  --source DIR          Build from an existing pg_sorted_heap checkout.
+  --source DIR          Build from an existing extension source checkout.
   --repo URL            Git repo to clone when --source is not supplied.
-  --build-dir DIR       Clone/build directory. Default: $TMPDIR/mempalace-pg-sorted-heap.
+  --build-dir DIR       Clone/build directory. Default: $TMPDIR/mempalace-<extension>-build.
   --sudo                Run make install through sudo.
   --no-create-extension Install files only; do not run CREATE EXTENSION.
-  --force-build         Build/install even if pg_sorted_heap already appears installed.
+  --force-build         Build/install even if the extension already appears installed.
   -h, --help            Show this help.
 
 Environment:
@@ -39,6 +41,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --extension)
+      EXTENSION_NAME="${2:?--extension requires a value}"
+      shift 2
+      ;;
     --dsn)
       DSN="${2:?--dsn requires a value}"
       shift 2
@@ -87,6 +93,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$EXTENSION_NAME" in
+  pg_sorted_heap)
+    DEFAULT_REPO_URL="https://github.com/skuznetsov/pg_sorted_heap.git"
+    ;;
+  vector)
+    DEFAULT_REPO_URL="https://github.com/pgvector/pgvector.git"
+    ;;
+  *)
+    echo "Unsupported extension: $EXTENSION_NAME" >&2
+    echo "Expected one of: pg_sorted_heap, vector" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "$REPO_URL" ]]; then
+  REPO_URL="$DEFAULT_REPO_URL"
+fi
+if [[ -z "$BUILD_DIR" ]]; then
+  BUILD_DIR="${TMPDIR:-/tmp}/mempalace-${EXTENSION_NAME}-build"
+fi
+
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Missing required command: $1" >&2
@@ -108,25 +135,26 @@ fi
 
 SHARE_DIR="$("$PG_CONFIG_BIN" --sharedir)"
 PKG_LIB_DIR="$("$PG_CONFIG_BIN" --pkglibdir)"
-CONTROL_FILE="$SHARE_DIR/extension/pg_sorted_heap.control"
+CONTROL_FILE="$SHARE_DIR/extension/$EXTENSION_NAME.control"
 case "$(uname -s)" in
   Darwin) LIB_SUFFIX=".dylib" ;;
   *) LIB_SUFFIX=".so" ;;
 esac
-LIB_FILE="$PKG_LIB_DIR/pg_sorted_heap$LIB_SUFFIX"
+LIB_FILE="$PKG_LIB_DIR/$EXTENSION_NAME$LIB_SUFFIX"
 
+echo "extension: $EXTENSION_NAME"
 echo "Target PostgreSQL: $("$PG_CONFIG_BIN" --version)"
 echo "pg_config: $PG_CONFIG_BIN"
 echo "extension dir: $SHARE_DIR/extension"
 echo "library dir: $PKG_LIB_DIR"
 
 if [[ "$FORCE_BUILD" -eq 0 && -f "$CONTROL_FILE" && -e "$LIB_FILE" ]]; then
-  echo "pg_sorted_heap already appears installed for this PostgreSQL."
+  echo "$EXTENSION_NAME already appears installed for this PostgreSQL."
 else
   need_cmd make
   if [[ -n "$SOURCE_DIR" ]]; then
     if [[ ! -f "$SOURCE_DIR/Makefile" ]]; then
-      echo "--source does not look like a pg_sorted_heap checkout: $SOURCE_DIR" >&2
+      echo "--source does not look like a PostgreSQL extension checkout: $SOURCE_DIR" >&2
       exit 1
     fi
     BUILD_PATH="$SOURCE_DIR"
@@ -146,10 +174,10 @@ else
     fi
   fi
 
-  echo "Building pg_sorted_heap"
+  echo "Building $EXTENSION_NAME"
   make -C "$BUILD_PATH" PG_CONFIG="$PG_CONFIG_BIN"
 
-  echo "Installing pg_sorted_heap"
+  echo "Installing $EXTENSION_NAME"
   if [[ "$USE_SUDO" -eq 1 ]]; then
     sudo make -C "$BUILD_PATH" install PG_CONFIG="$PG_CONFIG_BIN"
   else
@@ -166,16 +194,16 @@ fi
 if [[ "$CREATE_EXTENSION" -eq 1 ]]; then
   if [[ -z "$DSN" ]]; then
     echo "No DSN supplied; skipping CREATE EXTENSION."
-    echo "Run later: psql <dsn> -c 'CREATE EXTENSION IF NOT EXISTS pg_sorted_heap;'"
+    echo "Run later: psql <dsn> -c 'CREATE EXTENSION IF NOT EXISTS $EXTENSION_NAME;'"
   else
     if [[ -z "$PSQL_BIN" || ! -x "$PSQL_BIN" ]]; then
       echo "Could not find psql. Pass --psql /path/to/psql or use --no-create-extension." >&2
       exit 1
     fi
     echo "Creating extension in target database"
-    "$PSQL_BIN" "$DSN" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS pg_sorted_heap;"
+    "$PSQL_BIN" "$DSN" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS $EXTENSION_NAME;"
     "$PSQL_BIN" "$DSN" -v ON_ERROR_STOP=1 -Atc \
-      "SELECT extname FROM pg_extension WHERE extname = 'pg_sorted_heap';"
+      "SELECT extname FROM pg_extension WHERE extname = '$EXTENSION_NAME';"
   fi
 fi
 

@@ -639,9 +639,11 @@ The PostgreSQL backend requires either `pg_sorted_heap` or `pgvector` in the
 database. When both are available, MemPalace prefers `pg_sorted_heap` and stores
 drawers in a `sorted_heap` table keyed by `(wing, room, id)`, with
 `sorted_hnsw` vector search. If only `pgvector` is available, it falls back to a
-regular heap table plus `hnsw` vector index.
+regular heap table plus `hnsw` vector index. Both options are PostgreSQL
+extensions; the fallback is automatic only after `vector` is installed or exposed
+by the server and created in the database.
 
-See [docs/postgres_backend.md](docs/postgres_backend.md) for `pg_sorted_heap`
+See [docs/postgres_backend.md](docs/postgres_backend.md) for extension
 installation steps and the optional helper script for source checkouts:
 `scripts/install_pg_backend.sh`.
 
