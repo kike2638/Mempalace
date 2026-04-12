@@ -296,3 +296,81 @@ def test_status_missing_palace_does_not_create_empty_collection(tmp_path, capsys
     out = capsys.readouterr().out
     assert "No palace found" in out
     assert not palace_path.exists()
+
+
+def test_scan_project_respects_mempalace_ignore():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+
+        write_file(project_root / ".mempalace-ignore", "drafts/\nsecrets.py\n")
+        write_file(project_root / "src" / "app.py", "print('hello')\n" * 20)
+        write_file(project_root / "secrets.py", "print('secret')\n" * 20)
+        write_file(project_root / "drafts" / "note.py", "print('draft')\n" * 20)
+
+        assert scanned_files(project_root) == ["src/app.py"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_project_mempalace_ignore_applies_without_gitignore():
+    # The --no-gitignore equivalent should still honour .mempalace-ignore so
+    # mining-specific exclusions can live outside the project's git config.
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+
+        write_file(project_root / ".mempalace-ignore", "secrets.py\n")
+        write_file(project_root / "src" / "app.py", "print('hello')\n" * 20)
+        write_file(project_root / "secrets.py", "print('secret')\n" * 20)
+
+        assert scanned_files(project_root, respect_gitignore=False) == ["src/app.py"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_project_mempalace_ignore_overrides_gitignore_negation():
+    # .mempalace-ignore is applied after .gitignore, so it has the final say
+    # when the two files disagree about the same path.
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+
+        write_file(project_root / ".gitignore", "data/\n!data/keep.csv\n")
+        write_file(project_root / ".mempalace-ignore", "data/keep.csv\n")
+        write_file(project_root / "src" / "app.py", "print('main')\n" * 20)
+        write_file(project_root / "data" / "keep.csv", "a,b,c\n" * 20)
+        write_file(project_root / "data" / "drop.csv", "x,y,z\n" * 20)
+
+        assert scanned_files(project_root) == ["src/app.py"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_project_mempalace_ignore_not_self_included():
+    # The ignore file itself should never end up in the scan output.
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+
+        write_file(project_root / ".mempalace-ignore", "# exclude nothing\n")
+        write_file(project_root / "note.md", "hello\n" * 20)
+
+        assert scanned_files(project_root) == ["note.md"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_project_nested_mempalace_ignore():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+
+        write_file(project_root / "top.md", "top\n" * 20)
+        write_file(project_root / "sub" / ".mempalace-ignore", "ignored.md\n")
+        write_file(project_root / "sub" / "keep.md", "keep\n" * 20)
+        write_file(project_root / "sub" / "ignored.md", "drop\n" * 20)
+
+        assert scanned_files(project_root) == ["sub/keep.md", "top.md"]
+    finally:
+        shutil.rmtree(tmpdir)
