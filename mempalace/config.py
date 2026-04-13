@@ -18,7 +18,7 @@ logger = logging.getLogger("mempalace")
 # ── Input validation ──────────────────────────────────────────────────────────
 
 MAX_NAME_LENGTH = 128
-_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_ .'-]{0,126}[a-zA-Z0-9]?$")
+_SAFE_NAME_RE = re.compile(r"^(?:[^\W_]|[^\W_][\w .'-]{0,126}[^\W_])$")
 
 
 def sanitize_name(value: str, field_name: str = "name") -> str:
