@@ -94,7 +94,9 @@ else:
         pass
 
 # Keys whose values should be redacted in WAL entries to avoid logging sensitive content
-_WAL_REDACT_KEYS = frozenset({"content_preview", "entry_preview"})
+_WAL_REDACT_KEYS = frozenset(
+    {"content", "content_preview", "document", "entry", "entry_preview", "query", "text"}
+)
 
 
 def _wal_log(operation: str, params: dict, result: dict = None):
@@ -212,6 +214,13 @@ def _get_cached_metadata(col, where=None):
     return result
 
 
+def _sanitize_optional_name(value: str = None, field_name: str = "name") -> str:
+    """Validate optional wing/room-style filters."""
+    if value is None:
+        return None
+    return sanitize_name(value, field_name)
+
+
 # ==================== READ TOOLS ====================
 
 
@@ -296,6 +305,10 @@ def tool_list_wings():
 
 
 def tool_list_rooms(wing: str = None):
+    try:
+        wing = _sanitize_optional_name(wing, "wing")
+    except ValueError as e:
+        return {"error": str(e)}
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -345,6 +358,11 @@ def tool_search(
     context: str = None,
 ):
     limit = max(1, min(limit, _MAX_RESULTS))
+    try:
+        wing = _sanitize_optional_name(wing, "wing")
+        room = _sanitize_optional_name(room, "room")
+    except ValueError as e:
+        return {"error": str(e)}
     # Backwards compat: accept old name
     # Backwards compat: convert old similarity scale (higher=stricter) to
     # distance scale (lower=stricter). Similarity 0.8 → distance 0.2.
@@ -425,6 +443,11 @@ def tool_traverse_graph(start_room: str, max_hops: int = 2):
 
 def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
     """Find rooms that bridge two wings — the hallways connecting domains."""
+    try:
+        wing_a = _sanitize_optional_name(wing_a, "wing_a")
+        wing_b = _sanitize_optional_name(wing_b, "wing_b")
+    except ValueError as e:
+        return {"error": str(e)}
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -559,6 +582,11 @@ def tool_list_drawers(wing: str = None, room: str = None, limit: int = 20, offse
     """List drawers with pagination. Optional wing/room filter."""
     limit = max(1, min(limit, _MAX_RESULTS))
     offset = max(0, offset)
+    try:
+        wing = _sanitize_optional_name(wing, "wing")
+        room = _sanitize_optional_name(room, "room")
+    except ValueError as e:
+        return {"error": str(e)}
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -1098,8 +1126,8 @@ TOOLS = {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Short search query ONLY — keywords or a question. Max 200 chars recommended.",
-                    "maxLength": 500,
+                    "description": "Short search query ONLY — keywords or a question. Max 250 chars.",
+                    "maxLength": 250,
                 },
                 "limit": {
                     "type": "integer",

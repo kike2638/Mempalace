@@ -156,7 +156,7 @@ def cmd_migrate(args):
     from .migrate import migrate
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
-    migrate(palace_path=palace_path, dry_run=args.dry_run)
+    migrate(palace_path=palace_path, dry_run=args.dry_run, confirm=getattr(args, "yes", False))
 
 
 def cmd_status(args):
@@ -170,11 +170,18 @@ def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
     import chromadb
     import shutil
+    from .migrate import confirm_destructive_action, contains_palace_database
 
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    palace_path = os.path.abspath(
+        os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    )
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
 
     if not os.path.isdir(palace_path):
         print(f"\n  No palace found at {palace_path}")
+        return
+    if not contains_palace_database(palace_path):
+        print(f"\n  No palace database found at {db_path}")
         return
 
     print(f"\n{'=' * 55}")
@@ -197,6 +204,11 @@ def cmd_repair(args):
         print("  Nothing to repair.")
         return
 
+    if not confirm_destructive_action(
+        "Repair", palace_path, assume_yes=getattr(args, "yes", False)
+    ):
+        return
+
     # Extract all drawers in batches
     print("\n  Extracting drawers...")
     batch_size = 5000
@@ -213,9 +225,15 @@ def cmd_repair(args):
     print(f"  Extracted {len(all_ids)} drawers")
 
     # Backup and rebuild
-    palace_path = palace_path.rstrip(os.sep)
+    palace_path = os.path.normpath(palace_path)
     backup_path = palace_path + ".backup"
     if os.path.exists(backup_path):
+        if not contains_palace_database(backup_path):
+            print(
+                "  Backup validation failed: backup path exists but does not contain chroma.sqlite3. "
+                f"Please remove or rename: {backup_path}"
+            )
+            return
         shutil.rmtree(backup_path)
     print(f"  Backing up to {backup_path}...")
     shutil.copytree(palace_path, backup_path)
@@ -532,7 +550,7 @@ def main():
     sub.add_parser(
         "repair",
         help="Rebuild palace vector index from stored data (fixes segfaults after corruption)",
-    )
+    ).add_argument("--yes", action="store_true", help="Skip confirmation for destructive changes")
 
     # mcp
     sub.add_parser(
@@ -550,6 +568,9 @@ def main():
         "--dry-run",
         action="store_true",
         help="Show what would be migrated without changing anything",
+    )
+    p_migrate.add_argument(
+        "--yes", action="store_true", help="Skip confirmation for destructive changes"
     )
 
     sub.add_parser("status", help="Show what's been filed")

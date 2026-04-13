@@ -8,6 +8,8 @@ via monkeypatch to avoid touching real data.
 
 import json
 
+import pytest
+
 
 def _patch_mcp_server(monkeypatch, config, kg):
     """Patch the mcp_server module globals to use test fixtures."""
@@ -310,6 +312,59 @@ class TestSearchTool:
         result_strict = tool_search(query="JWT", max_distance=999.0, min_similarity=0.01)
         result_loose = tool_search(query="JWT", max_distance=0.01, min_similarity=999.0)
         assert len(result_strict["results"]) <= len(result_loose["results"])
+
+    def test_list_rooms_rejects_invalid_wing(self, monkeypatch, config, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda *args, **kwargs: pytest.fail())
+
+        result = mcp_server.tool_list_rooms(wing="../etc/passwd")
+        assert "error" in result
+
+    def test_search_rejects_invalid_room(self, monkeypatch, config, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(mcp_server, "search_memories", lambda *args, **kwargs: pytest.fail())
+
+        result = mcp_server.tool_search(query="JWT", room="../backend")
+        assert "error" in result
+
+    def test_list_drawers_rejects_invalid_wing(self, monkeypatch, config, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda *args, **kwargs: pytest.fail())
+
+        result = mcp_server.tool_list_drawers(wing="../notes")
+        assert "error" in result
+
+    def test_find_tunnels_rejects_invalid_wing(self, monkeypatch, config, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda *args, **kwargs: pytest.fail())
+
+        result = mcp_server.tool_find_tunnels(wing_a="../project")
+        assert "error" in result
+
+    def test_wal_redacts_sensitive_fields(self, monkeypatch, config, kg, tmp_path):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        wal_file = tmp_path / "write_log.jsonl"
+        monkeypatch.setattr(mcp_server, "_WAL_FILE", wal_file)
+
+        mcp_server._wal_log(
+            "test",
+            {"content": "secret note", "query": "private search", "safe": "ok"},
+        )
+
+        entry = json.loads(wal_file.read_text().strip())
+        assert entry["params"]["content"].startswith("[REDACTED")
+        assert entry["params"]["query"].startswith("[REDACTED")
+        assert entry["params"]["safe"] == "ok"
 
 
 # ── Write Tools ─────────────────────────────────────────────────────────
