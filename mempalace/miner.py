@@ -16,6 +16,7 @@ from datetime import datetime
 from collections import defaultdict
 
 from .palace import SKIP_DIRS, get_collection, file_already_mined
+from .scanner import scan_content, format_warnings
 
 READABLE_EXTENSIONS = {
     ".txt",
@@ -426,6 +427,13 @@ def process_file(
     content = content.strip()
     if len(content) < MIN_CHUNK_SIZE:
         return 0, "general"
+
+    findings = scan_content(content)
+    if findings:
+        print(
+            f"  ⚠ {filepath.name}: {format_warnings(findings)}",
+            file=sys.stderr,
+        )
 
     room = detect_room(filepath, content, rooms, project_path)
     chunks = chunk_text(content, source_file)

@@ -35,6 +35,7 @@ from .searcher import search_memories
 from .palace_graph import traverse, find_tunnels, graph_stats
 
 from .knowledge_graph import KnowledgeGraph
+from .scanner import scan_content, format_warnings
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -480,6 +481,8 @@ def tool_add_drawer(
     except Exception:
         pass
 
+    findings = scan_content(content)
+
     try:
         col.upsert(
             ids=[drawer_id],
@@ -497,7 +500,10 @@ def tool_add_drawer(
         )
         _metadata_cache = None
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
-        return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
+        result = {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
+        if findings:
+            result["warnings"] = format_warnings(findings)
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
