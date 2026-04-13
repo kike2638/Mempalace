@@ -49,8 +49,10 @@ SKIP_FILENAMES = {
     "package-lock.json",
 }
 
-CHUNK_SIZE = 800  # chars per drawer
-CHUNK_OVERLAP = 100  # overlap between chunks
+from .config import DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, read_collection_metadata
+
+CHUNK_SIZE = DEFAULT_CHUNK_SIZE
+CHUNK_OVERLAP = DEFAULT_CHUNK_OVERLAP
 MIN_CHUNK_SIZE = 50  # skip tiny chunks
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB — skip files larger than this
 
@@ -320,7 +322,7 @@ def detect_room(filepath: Path, content: str, rooms: list, project_path: Path) -
 # =============================================================================
 
 
-def chunk_text(content: str, source_file: str) -> list:
+def chunk_text(content: str, source_file: str, chunk_size: int = None, chunk_overlap: int = None) -> list:
     """
     Split content into drawer-sized chunks.
     Tries to split on paragraph/line boundaries.
@@ -331,21 +333,23 @@ def chunk_text(content: str, source_file: str) -> list:
     if not content:
         return []
 
+    cs = chunk_size or CHUNK_SIZE
+    co = chunk_overlap or CHUNK_OVERLAP
+
     chunks = []
     start = 0
     chunk_index = 0
 
     while start < len(content):
-        end = min(start + CHUNK_SIZE, len(content))
+        end = min(start + cs, len(content))
 
-        # Try to break at paragraph boundary
         if end < len(content):
             newline_pos = content.rfind("\n\n", start, end)
-            if newline_pos > start + CHUNK_SIZE // 2:
+            if newline_pos > start + cs // 2:
                 end = newline_pos
             else:
                 newline_pos = content.rfind("\n", start, end)
-                if newline_pos > start + CHUNK_SIZE // 2:
+                if newline_pos > start + cs // 2:
                     end = newline_pos
 
         chunk = content[start:end].strip()
@@ -358,7 +362,7 @@ def chunk_text(content: str, source_file: str) -> list:
             )
             chunk_index += 1
 
-        start = end - CHUNK_OVERLAP if end < len(content) else end
+        start = end - co if end < len(content) else end
 
     return chunks
 
@@ -410,6 +414,8 @@ def process_file(
     rooms: list,
     agent: str,
     dry_run: bool,
+    chunk_size: int = None,
+    chunk_overlap: int = None,
 ) -> tuple:
     """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
 
@@ -428,7 +434,7 @@ def process_file(
         return 0, "general"
 
     room = detect_room(filepath, content, rooms, project_path)
-    chunks = chunk_text(content, source_file)
+    chunks = chunk_text(content, source_file, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     if dry_run:
         print(f"    [DRY RUN] {filepath.name} → room:{room} ({len(chunks)} drawers)")
@@ -544,8 +550,14 @@ def mine(
     dry_run: bool = False,
     respect_gitignore: bool = True,
     include_ignored: list = None,
+    source_files: list = None,
 ):
-    """Mine a project directory into the palace."""
+    """Mine a project directory into the palace.
+
+    If *source_files* is provided, only those files are mined (skipping
+    the directory scan).  This is used by ``mempalace re-mine`` to
+    re-embed exactly the files that were in the palace before.
+    """
 
     project_path = Path(project_dir).expanduser().resolve()
     config = load_config(project_dir)
@@ -553,11 +565,14 @@ def mine(
     wing = wing_override or config["wing"]
     rooms = config.get("rooms", [{"name": "general", "description": "All project files"}])
 
-    files = scan_project(
-        project_dir,
-        respect_gitignore=respect_gitignore,
-        include_ignored=include_ignored,
-    )
+    if source_files is not None:
+        files = [Path(f) for f in source_files if os.path.isfile(f)]
+    else:
+        files = scan_project(
+            project_dir,
+            respect_gitignore=respect_gitignore,
+            include_ignored=include_ignored,
+        )
     if limit > 0:
         files = files[:limit]
 
@@ -575,6 +590,11 @@ def mine(
     if include_ignored:
         print(f"  Include: {', '.join(sorted(normalize_include_paths(include_ignored)))}")
     print(f"{'─' * 55}\n")
+
+    # Read chunk params from collection metadata
+    col_meta = read_collection_metadata(palace_path)
+    p_chunk_size = col_meta.get("chunk_size", CHUNK_SIZE)
+    p_chunk_overlap = col_meta.get("chunk_overlap", CHUNK_OVERLAP)
 
     if not dry_run:
         collection = get_collection(palace_path)
@@ -594,6 +614,8 @@ def mine(
             rooms=rooms,
             agent=agent,
             dry_run=dry_run,
+            chunk_size=p_chunk_size,
+            chunk_overlap=p_chunk_overlap,
         )
         if drawers == 0 and not dry_run:
             files_skipped += 1
@@ -622,8 +644,10 @@ def mine(
 
 def status(palace_path: str):
     """Show what's been filed in the palace."""
+    from .palace import iter_all_metadatas, get_collection as _palace_get_collection
+
     try:
-        col = get_collection(palace_path, create=False)
+        col = _palace_get_collection(palace_path, create=False)
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
